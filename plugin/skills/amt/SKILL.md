@@ -31,10 +31,15 @@ rollout filename, which is the id AMT keys rows by.
 1. Run exactly one command, using whichever session variable is set:
 
    ```sh
-   amt recall "${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}" --amt-key <amt_key>
+   PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" \
+     amt recall "${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}" --amt-key <amt_key>
    ```
 
    Add `--clone` when the user asked for `clone`.
+
+   The `PATH` prefix is required, not decoration: macOS ships an unrelated
+   `/usr/sbin/amt` that otherwise wins. If the output looks nothing like a
+   handoff, that is what you ran.
 
 2. Adopt what the command prints as your own working memory for this session,
    and continue the user's work from it. It is a replacement, not a reference:

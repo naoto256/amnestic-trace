@@ -42,13 +42,13 @@ fi
 slug=$(printf '%s' "$session_id" | tr -c 'A-Za-z0-9._-' '_')
 marker="$amt_home/prefrontal-cortex/$slug.marker"
 
-# The host may not export a login PATH to hooks.
-amt=$(command -v amt 2>/dev/null)
-for candidate in "$HOME/.local/bin/amt" "$HOME/.cargo/bin/amt" "/usr/local/bin/amt"; do
-	[ -n "$amt" ] && break
-	[ -x "$candidate" ] && amt=$candidate
-done
-[ -n "$amt" ] || exit 0
+# Hook execution inherits a minimal PATH that omits the directories cargo and
+# the usual installers write to, so `command -v amt` would miss an installed
+# binary and this script would silently do nothing.
+PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH
+
+command -v amt >/dev/null 2>&1 || exit 0
 
 case "$event" in
 precompact)
@@ -63,7 +63,7 @@ precompact)
 	fi
 	[ -n "$journal" ] && [ -f "$journal" ] || exit 0
 	# Returns as soon as the worker has detached and the marker is on disk.
-	"$amt" synthesize "$session_id" "$journal" >/dev/null 2>&1
+	amt synthesize "$session_id" "$journal" >/dev/null 2>&1
 	;;
 recall)
 	# The marker is an undelivered snapshot, not a "compaction happened" flag.
@@ -92,7 +92,7 @@ recall)
 
 	# Deliver first, then discharge the debt, so a snapshot is never marked
 	# delivered on a turn that failed to inject it.
-	if "$amt" recall "$session_id" 2>/dev/null; then
+	if amt recall "$session_id" 2>/dev/null; then
 		rm -f "$marker"
 	fi
 	;;

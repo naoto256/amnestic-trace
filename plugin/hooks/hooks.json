@@ -1,11 +1,13 @@
 {
+  "description": "AMT PreCompact capture + turn-start injection of the replacement memory.",
   "hooks": {
     "PreCompact": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/amt-hook.sh precompact",
+            "command": "\"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/tools/amt-hook.sh\" precompact",
             "statusMessage": "AMT: capturing working memory"
           }
         ]
@@ -13,10 +15,11 @@
     ],
     "UserPromptSubmit": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/amt-hook.sh recall",
+            "command": "\"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/tools/amt-hook.sh\" recall",
             "statusMessage": "AMT: restoring working memory"
           }
         ]

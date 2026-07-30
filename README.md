@@ -15,7 +15,7 @@ amt recall <session_id> --amt-key <key>      # cross-session handoff (MOVE)
 amt recall <session_id> --amt-key <key> --clone
 ```
 
-`synthesize` writes a marker, self-daemonizes by double fork, and returns, so
+`synthesize` writes a marker, detaches by double fork, and returns, so
 extraction runs in parallel with compaction itself.
 
 The marker is an **undelivered snapshot**, not a "compaction happened" flag:
@@ -56,17 +56,27 @@ and the reading hook would present as memory loss.
 ## Install
 
 ```sh
-cargo build --release
-install -m 755 target/release/amt ~/.local/bin/amt
+cargo install --path .
 ```
 
-Claude Code: install `plugin/` as a plugin (`hooks/hooks.json` is picked up
-automatically). Codex: copy `plugin/codex/hooks.json` to `~/.codex/hooks.json`
-(merging with any existing hooks) and enable `[features] codex_hooks = true` in
-`~/.codex/config.toml`.
+Then install the plugin, which wires the hooks that call the binary:
 
-Both hosts run the same `plugin/hooks/amt-hook.sh`; only the plugin-root
-variable differs.
+```sh
+# Claude Code
+claude plugin marketplace add /absolute/path/to/amnestictrace
+claude plugin install amt@naoto256-amt
+
+# Codex (also needs `[features] codex_hooks = true` in ~/.codex/config.toml)
+codex plugin marketplace add /absolute/path/to/amnestictrace
+codex plugin add amt@naoto256-amt
+```
+
+Both hosts install from the same `plugin/` directory via
+`.claude-plugin/marketplace.json` at the repo root. Full install, uninstall and
+prerequisite notes are in [`plugin/README.md`](plugin/README.md).
+
+Without the plugin the binary is still usable by hand, and the hooks are the
+only thing that makes it automatic.
 
 ## Manual verification
 
