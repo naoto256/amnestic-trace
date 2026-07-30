@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/amt-hook.sh precompact",
+            "statusMessage": "AMT: capturing working memory"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/amt-hook.sh recall",
+            "statusMessage": "AMT: restoring working memory"
+          }
+        ]
+      }
+    ]
+  }
+}
