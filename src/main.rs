@@ -5,7 +5,7 @@
 //! missing row means "inject nothing" and exit 0. The next compaction redoes
 //! the work, so nothing is worth a recovery mechanism.
 
-mod daemon;
+mod detach;
 mod extract;
 mod journal;
 mod store;
@@ -50,7 +50,7 @@ fn synthesize(session_id: &str, journal: &Path) -> io::Result<()> {
     let store = Store::open()?;
     store.mark_ongoing(session_id)?;
 
-    if !daemon::detach() {
+    if !detach::detach() {
         return Ok(()); // hook process: done
     }
 

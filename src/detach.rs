@@ -1,6 +1,9 @@
-//! Self-daemonization by double fork. macOS ships no `setsid(1)`, so the
-//! detach is done in-process; it completes before any heavy initialization so
-//! the window in which the host can kill the worker stays narrow.
+//! Detaching from the host by double fork. macOS ships no `setsid(1)`, so it
+//! is done in-process; it completes before any heavy initialization so the
+//! window in which the host can kill the worker stays narrow.
+//!
+//! The worker this produces is not a daemon: it does one extraction and exits.
+//! Cutting it loose from the host's process group is the whole point.
 
 /// Returns `true` in the process that should do the work.
 ///

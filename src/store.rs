@@ -3,7 +3,7 @@
 //! Base directory resolution is deliberately env-free: hooks are spawned by the
 //! host and are not guaranteed to inherit a shell environment, so a variable
 //! like XDG_DATA_HOME could resolve differently for the writer (a detached
-//! daemon) and the reader (a hook), which would look like memory loss. The rule
+//! worker) and the reader (a hook), which would look like memory loss. The rule
 //! is a hardcoded two-way branch on the existence of `~/.local`.
 
 use std::fs;
