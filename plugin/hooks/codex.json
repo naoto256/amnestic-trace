@@ -1,5 +1,5 @@
 {
-  "description": "AMT PreCompact capture + turn-start injection (Codex). Declared separately from hooks/hooks.json because the two hosts differ in what can be asserted here, not because the work differs — both run the same tools/amtr-hook.sh.",
+  "description": "AMT PreCompact capture + turn-start injection (Codex). Declared separately from hooks/claude.json because the two hosts differ in what can be asserted here, not because the work differs — both run the same tools/amtr-hook.sh.",
   "hooks": {
     "PreCompact": [
       {

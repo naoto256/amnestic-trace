@@ -7,7 +7,7 @@ session.
 
 ## What it does
 
-- **`PreCompact` hook** (`hooks/hooks.json` → `tools/amtr-hook.sh precompact`).
+- **`PreCompact` hook** (`hooks/claude.json` → `tools/amtr-hook.sh precompact`).
   Hands the journal path to `amtr synthesize`, which records an undelivered
   snapshot and detaches a worker before returning. Extraction therefore runs in
   parallel with compaction itself rather than delaying it.
@@ -21,10 +21,11 @@ session.
   inside one session needs no key and no skill.
 
 Both hosts run the same `tools/amtr-hook.sh`, but each declares it in its own
-file: `hooks/hooks.json` for Claude Code, `hooks/codex-hooks.json` for Codex
-(named by the `hooks` key in `.codex-plugin/plugin.json`). The script is shared
-because the work is identical; the declarations are split because what can be
-asserted about each host is not.
+file: `hooks/claude.json` and `hooks/codex.json`, each named by the `hooks` key
+in that host's manifest. Neither is found by convention, so the pairing is
+stated rather than inferred. The script is shared because the work is
+identical; the declarations are split because what can be asserted about each
+host is not.
 
 Concretely, the Claude Code file sets `timeout` explicitly — 10s for the
 capture hook, which returns as soon as the worker has detached, and 35s for the
@@ -91,8 +92,8 @@ codex plugin marketplace add /absolute/path/to/amnestictrace
 codex plugin add amtr@naoto256-amtr
 ```
 
-Codex reads `.codex-plugin/plugin.json` and `hooks/hooks.json` from this same
-directory. Hooks must also be enabled in `~/.codex/config.toml`:
+Codex reads `.codex-plugin/plugin.json` and, through it, `hooks/codex.json`
+from this same directory. Hooks must also be enabled in `~/.codex/config.toml`:
 
 ```toml
 [features]
@@ -124,9 +125,11 @@ marker once the hooks are gone.
 
 ## Files
 
-- `.claude-plugin/plugin.json` — Claude Code manifest.
-- `.codex-plugin/plugin.json` — Codex manifest; adds `skills` so Codex finds
-  `/amtr` (Claude Code discovers `skills/` by convention).
-- `hooks/hooks.json` — `PreCompact` capture + `UserPromptSubmit` delivery.
+- `.claude-plugin/plugin.json` — Claude Code manifest; names `hooks/claude.json`.
+- `.codex-plugin/plugin.json` — Codex manifest; names `hooks/codex.json`, and
+  adds `skills` so Codex finds `/amtr` (Claude Code takes `skills/` by
+  convention).
+- `hooks/claude.json`, `hooks/codex.json` — `PreCompact` capture +
+  `UserPromptSubmit` delivery, declared per host.
 - `tools/amtr-hook.sh` — both hooks, dispatched on its first argument.
 - `skills/amtr/SKILL.md` — the `/amtr <amtr_key> [clone]` wrapper.

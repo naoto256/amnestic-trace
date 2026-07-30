@@ -6,5 +6,5 @@
     "name": "Naoto Morishima"
   },
   "skills": "./skills/",
-  "hooks": "./hooks/codex-hooks.json"
+  "hooks": "./hooks/codex.json"
 }

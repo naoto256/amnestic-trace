@@ -1,5 +1,5 @@
 {
-  "description": "AMT PreCompact capture + turn-start injection (Claude Code). Codex reads hooks/codex-hooks.json instead; the two differ in what they can safely assert about timeouts.",
+  "description": "AMT PreCompact capture + turn-start injection (Claude Code). Codex reads hooks/codex.json instead; the two differ only in what each can safely assert about timeouts.",
   "hooks": {
     "PreCompact": [
       {
