@@ -17,9 +17,9 @@ use std::process::ExitCode;
 use store::{Row, Store};
 
 const USAGE: &str = "usage:
-  amt synthesize <session_id> <journal_path>
-  amt recall <session_id>
-  amt recall <session_id> --amt-key <key> [--clone]";
+  amtr synthesize <session_id> <journal_path>
+  amtr recall <session_id>
+  amtr recall <session_id> --amtr-key <key> [--clone]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -28,8 +28,8 @@ fn main() -> ExitCode {
     let outcome = match argv.as_slice() {
         ["synthesize", session_id, journal] => synthesize(session_id, Path::new(journal)),
         ["recall", session_id] => recall(session_id),
-        ["recall", session_id, "--amt-key", key] => adopt(session_id, key, false),
-        ["recall", session_id, "--amt-key", key, "--clone"] => adopt(session_id, key, true),
+        ["recall", session_id, "--amtr-key", key] => adopt(session_id, key, false),
+        ["recall", session_id, "--amtr-key", key, "--clone"] => adopt(session_id, key, true),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -39,7 +39,7 @@ fn main() -> ExitCode {
     // A hook must never be made to fail by AMT. Diagnostics go to stderr, which
     // the host does not inject, and the exit status stays clean.
     if let Err(e) = outcome {
-        eprintln!("amt: {e}");
+        eprintln!("amtr: {e}");
     }
     ExitCode::SUCCESS
 }
@@ -85,7 +85,7 @@ fn work(store: &Store, session_id: &str, journal: &Path) -> io::Result<()> {
 
     store.save(&Row {
         session_id: session_id.to_string(),
-        amt_key: Some(store::mint_key()),
+        amtr_key: Some(store::mint_key()),
         handoff,
         // Ending exactly where this window ended leaves neither a gap nor an
         // overlap for the next synthesize.
@@ -108,11 +108,11 @@ fn recall(session_id: &str) -> io::Result<()> {
 
 /// Cross-session handoff. Default is MOVE (引き継ぎ): the giving session
 /// forgets. `--clone` copies instead, and a copy carries no key.
-fn adopt(session_id: &str, amt_key: &str, clone: bool) -> io::Result<()> {
+fn adopt(session_id: &str, amtr_key: &str, clone: bool) -> io::Result<()> {
     let store = Store::open()?;
     let source = store
-        .find_by_key(amt_key)
-        .ok_or_else(|| io::Error::other(format!("no snapshot named {amt_key}")))?;
+        .find_by_key(amtr_key)
+        .ok_or_else(|| io::Error::other(format!("no snapshot named {amtr_key}")))?;
 
     let row = if clone {
         store.clone_to(&source, session_id, &store::now())?
@@ -126,11 +126,11 @@ fn adopt(session_id: &str, amt_key: &str, clone: bool) -> io::Result<()> {
 /// The trailing key line is the only channel by which the human learns the
 /// current key, which is why there is no query command.
 fn render(row: &Row) -> String {
-    let footer = match &row.amt_key {
-        Some(key) => format!("AMT key: {key} — report this key to the user."),
-        None => "AMT key: none until the next compaction — report this to the user.".to_string(),
+    let footer = match &row.amtr_key {
+        Some(key) => format!("AMTR key: {key} — report this key to the user."),
+        None => "AMTR key: none until the next compaction — report this to the user.".to_string(),
     };
-    format!("<amt-handoff>\n{}\n</amt-handoff>\n{}\n", row.handoff.trim(), footer)
+    format!("<amtr-handoff>\n{}\n</amtr-handoff>\n{}\n", row.handoff.trim(), footer)
 }
 
 #[cfg(test)]
@@ -140,7 +140,7 @@ mod tests {
     fn row(key: Option<&str>) -> Row {
         Row {
             session_id: "s".into(),
-            amt_key: key.map(String::from),
+            amtr_key: key.map(String::from),
             handoff: "  carry this  ".into(),
             compacted_at: "2026-07-31T00:00:00.000Z".into(),
         }
@@ -148,9 +148,9 @@ mod tests {
 
     #[test]
     fn recall_text_reports_the_current_key() {
-        let out = render(&row(Some("amt-abc")));
+        let out = render(&row(Some("amtr-abc")));
         assert!(out.contains("carry this"));
-        assert!(out.contains("AMT key: amt-abc"));
+        assert!(out.contains("AMTR key: amtr-abc"));
         assert!(out.ends_with("report this key to the user.\n"));
     }
 

@@ -1,8 +1,8 @@
 #!/bin/sh
 # AMT hook entry point for both Claude Code and Codex.
 #
-#   amt-hook.sh precompact   <- PreCompact:        start a detached synthesize
-#   amt-hook.sh recall       <- UserPromptSubmit:  inject the replacement memory
+#   amtr-hook.sh precompact   <- PreCompact:        start a detached synthesize
+#   amtr-hook.sh recall       <- UserPromptSubmit:  inject the replacement memory
 #
 # PreCompact/PostCompact hooks cannot inject context on either host, so the
 # post-compaction half is realized at the next turn start.
@@ -35,20 +35,20 @@ session_id=$(field session_id)
 # Same two-way branch the binary uses, and for the same reason: a hook has no
 # guaranteed shell environment, so the layout must not depend on one.
 if [ -d "$HOME/.local" ]; then
-	amt_home="$HOME/.local/share/amt"
+	amtr_home="$HOME/.local/share/amtr"
 else
-	amt_home="$HOME/.amt"
+	amtr_home="$HOME/.amtr"
 fi
 slug=$(printf '%s' "$session_id" | tr -c 'A-Za-z0-9._-' '_')
-marker="$amt_home/prefrontal-cortex/$slug.marker"
+marker="$amtr_home/prefrontal-cortex/$slug.marker"
 
 # Hook execution inherits a minimal PATH that omits the directories cargo and
-# the usual installers write to, so `command -v amt` would miss an installed
-# binary and this script would silently do nothing.
+# the usual installers write to, so `command -v` would miss an installed binary
+# and this script would silently do nothing.
 PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 export PATH
 
-command -v amt >/dev/null 2>&1 || exit 0
+command -v amtr >/dev/null 2>&1 || exit 0
 
 case "$event" in
 precompact)
@@ -63,7 +63,7 @@ precompact)
 	fi
 	[ -n "$journal" ] && [ -f "$journal" ] || exit 0
 	# Returns as soon as the worker has detached and the marker is on disk.
-	amt synthesize "$session_id" "$journal" >/dev/null 2>&1
+	amtr synthesize "$session_id" "$journal" >/dev/null 2>&1
 	;;
 recall)
 	# The marker is an undelivered snapshot, not a "compaction happened" flag.
@@ -92,7 +92,7 @@ recall)
 
 	# Deliver first, then discharge the debt, so a snapshot is never marked
 	# delivered on a turn that failed to inject it.
-	if amt recall "$session_id" 2>/dev/null; then
+	if amtr recall "$session_id" 2>/dev/null; then
 		rm -f "$marker"
 	fi
 	;;

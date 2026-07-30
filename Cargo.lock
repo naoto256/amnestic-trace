@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "amt"
+name = "amtr"
 version = "0.2.0"
 dependencies = [
  "chrono",

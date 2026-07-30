@@ -19,7 +19,7 @@ pub struct Row {
     pub session_id: String,
     /// Name of *this* snapshot, minted at every synthesize. `None` for a clone,
     /// which is not a synthesize product and must not seed further chaining.
-    pub amt_key: Option<String>,
+    pub amtr_key: Option<String>,
     pub handoff: String,
     /// Boundary of the last window that was folded into `handoff`. The next
     /// synthesize reads the journal strictly after this timestamp.
@@ -36,14 +36,15 @@ pub struct Store {
 }
 
 impl Store {
-    /// `~/.local/share/amt` when `~/.local` exists, else `~/.amt`.
+    /// `~/.local/share/amtr` when `~/.local` exists, else
+    /// `~/.amtr`.
     pub fn base_dir() -> io::Result<PathBuf> {
         let home = std::env::home_dir()
             .ok_or_else(|| io::Error::other("cannot determine home directory"))?;
         Ok(if home.join(".local").is_dir() {
-            home.join(".local/share/amt")
+            home.join(".local/share/amtr")
         } else {
-            home.join(".amt")
+            home.join(".amtr")
         })
     }
 
@@ -98,7 +99,7 @@ impl Store {
     }
 
     /// Directory scan: the row count is at most the session count.
-    pub fn find_by_key(&self, amt_key: &str) -> Option<Row> {
+    pub fn find_by_key(&self, amtr_key: &str) -> Option<Row> {
         for entry in fs::read_dir(self.base.join(CORTEX)).ok()?.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -108,7 +109,7 @@ impl Store {
                 Some(r) => r,
                 None => continue,
             };
-            if row.amt_key.as_deref() == Some(amt_key) {
+            if row.amtr_key.as_deref() == Some(amtr_key) {
                 return Some(row);
             }
         }
@@ -127,11 +128,11 @@ impl Store {
     }
 
     /// CLONE: copy instead of move. The source row is untouched; the copy has no
-    /// amt_key, and its window boundary is the clone time.
+    /// amtr_key, and its window boundary is the clone time.
     pub fn clone_to(&self, row: &Row, new_session_id: &str, at: &str) -> io::Result<Row> {
         let copy = Row {
             session_id: new_session_id.to_string(),
-            amt_key: None,
+            amtr_key: None,
             handoff: row.handoff.clone(),
             compacted_at: at.to_string(),
         };
@@ -212,7 +213,7 @@ pub fn now() -> String {
 /// which would otherwise make `find_by_key` pick an arbitrary one.
 pub fn mint_key() -> String {
     let ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    format!("amt-{}-{}", base36(ms), base36(std::process::id() as u64))
+    format!("amtr-{}-{}", base36(ms), base36(std::process::id() as u64))
 }
 
 fn base36(mut n: u64) -> String {
@@ -238,7 +239,7 @@ mod tests {
 
     fn scratch() -> Store {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("amt-test-{}-{}", std::process::id(), n));
+        let dir = std::env::temp_dir().join(format!("amtr-test-{}-{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         Store::at(dir).unwrap()
     }
@@ -246,7 +247,7 @@ mod tests {
     fn row(session: &str, key: Option<&str>, handoff: &str) -> Row {
         Row {
             session_id: session.into(),
-            amt_key: key.map(String::from),
+            amtr_key: key.map(String::from),
             handoff: handoff.into(),
             compacted_at: "2026-07-31T00:00:00.000Z".into(),
         }
@@ -255,12 +256,12 @@ mod tests {
     #[test]
     fn upsert_overwrites_rather_than_accumulating() {
         let s = scratch();
-        s.save(&row("a", Some("amt-1"), "first")).unwrap();
-        s.save(&row("a", Some("amt-2"), "second")).unwrap();
+        s.save(&row("a", Some("amtr-1"), "first")).unwrap();
+        s.save(&row("a", Some("amtr-2"), "second")).unwrap();
         let got = s.load("a").unwrap();
         assert_eq!(got.handoff, "second");
-        assert_eq!(got.amt_key.as_deref(), Some("amt-2"));
-        assert!(s.find_by_key("amt-1").is_none(), "superseded key must not resolve");
+        assert_eq!(got.amtr_key.as_deref(), Some("amtr-2"));
+        assert!(s.find_by_key("amtr-1").is_none(), "superseded key must not resolve");
     }
 
     #[test]
@@ -271,34 +272,34 @@ mod tests {
     #[test]
     fn move_transfers_the_row_and_the_giver_forgets() {
         let s = scratch();
-        s.save(&row("giver", Some("amt-k"), "state")).unwrap();
-        let moved = s.take(&s.find_by_key("amt-k").unwrap(), "taker").unwrap();
+        s.save(&row("giver", Some("amtr-k"), "state")).unwrap();
+        let moved = s.take(&s.find_by_key("amtr-k").unwrap(), "taker").unwrap();
 
         assert_eq!(moved.session_id, "taker");
         assert_eq!(s.load("taker").unwrap().handoff, "state");
         assert!(s.load("giver").is_none(), "giver's next synthesize must be a first-compaction");
-        assert_eq!(s.find_by_key("amt-k").unwrap().session_id, "taker");
+        assert_eq!(s.find_by_key("amtr-k").unwrap().session_id, "taker");
     }
 
     #[test]
     fn move_onto_the_same_session_is_a_no_op_not_a_deletion() {
         let s = scratch();
-        s.save(&row("same", Some("amt-k"), "state")).unwrap();
-        s.take(&s.find_by_key("amt-k").unwrap(), "same").unwrap();
+        s.save(&row("same", Some("amtr-k"), "state")).unwrap();
+        s.take(&s.find_by_key("amtr-k").unwrap(), "same").unwrap();
         assert_eq!(s.load("same").unwrap().handoff, "state");
     }
 
     #[test]
     fn clone_copies_drops_the_key_and_leaves_the_source_intact() {
         let s = scratch();
-        s.save(&row("giver", Some("amt-k"), "state")).unwrap();
-        let copy = s.clone_to(&s.find_by_key("amt-k").unwrap(), "taker", "2026-08-01T12:00:00.000Z").unwrap();
+        s.save(&row("giver", Some("amtr-k"), "state")).unwrap();
+        let copy = s.clone_to(&s.find_by_key("amtr-k").unwrap(), "taker", "2026-08-01T12:00:00.000Z").unwrap();
 
         assert_eq!(copy.handoff, "state");
-        assert_eq!(copy.amt_key, None, "a clone must not seed further key-based chaining");
+        assert_eq!(copy.amtr_key, None, "a clone must not seed further key-based chaining");
         assert_eq!(copy.compacted_at, "2026-08-01T12:00:00.000Z");
         assert_eq!(s.load("giver").unwrap().handoff, "state", "clone is not a move");
-        assert_eq!(s.find_by_key("amt-k").unwrap().session_id, "giver");
+        assert_eq!(s.find_by_key("amtr-k").unwrap().session_id, "giver");
     }
 
     #[test]
@@ -373,7 +374,7 @@ mod tests {
     #[test]
     fn minted_keys_are_prefixed_and_non_empty() {
         let k = mint_key();
-        assert!(k.starts_with("amt-"));
+        assert!(k.starts_with("amtr-"));
         assert!(k.len() > 6);
     }
 }

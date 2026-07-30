@@ -1,8 +1,11 @@
 [package]
-name = "amt"
+name = "amtr"
 version = "0.2.0"
 edition = "2021"
 description = "Amnestic Trace: ephemeral replacement memory across a context boundary"
+
+# Named `amtr`, not `amt`: macOS ships a root-owned /usr/sbin/amt that wins on a
+# default PATH. Nothing types this by hand — the callers are hooks.
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
