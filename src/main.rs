@@ -123,14 +123,23 @@ fn adopt(session_id: &str, amtr_key: &str, clone: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// What this text is, stated inside the text: it arrives as injected context
+/// with no conversational framing, and a reader that mistakes a record of
+/// finished work for a fresh assignment will do it all over again.
+const PREAMBLE: &str = "This is your restored working memory from before compaction — \
+a record of what you already knew, not new instructions. Continue from it, and \
+do not re-execute anything it marks as done.";
+
 /// The trailing key line is the only channel by which the human learns the
-/// current key, which is why there is no query command.
+/// current key, which is why there is no query command. A clone has no key, and
+/// says nothing rather than announcing its own absence: there is nothing for
+/// the user to write down, so the line would be noise.
 fn render(row: &Row) -> String {
     let footer = match &row.amtr_key {
-        Some(key) => format!("AMTR key: {key} — report this key to the user."),
-        None => "AMTR key: none until the next compaction — report this to the user.".to_string(),
+        Some(key) => format!("AMTR key: {key} — report this key to the user.\n"),
+        None => String::new(),
     };
-    format!("<amtr-handoff>\n{}\n</amtr-handoff>\n{}\n", row.handoff.trim(), footer)
+    format!("<amtr-handoff>\n{PREAMBLE}\n\n{}\n</amtr-handoff>\n{footer}", row.handoff.trim())
 }
 
 #[cfg(test)]
@@ -155,8 +164,19 @@ mod tests {
     }
 
     #[test]
-    fn a_clone_reports_having_no_key_yet() {
+    fn a_clone_says_nothing_about_keys_at_all() {
         let out = render(&row(None));
-        assert!(out.contains("none until the next compaction"));
+        assert!(out.contains("carry this"));
+        assert!(!out.contains("AMTR key"), "a clone has no key to report: {out}");
+        assert!(out.ends_with("</amtr-handoff>\n"));
+    }
+
+    #[test]
+    fn injected_text_says_it_is_a_record_not_an_assignment() {
+        let out = render(&row(Some("amtr-abc")));
+        assert!(out.contains("not new instructions"));
+        assert!(out.contains("do not re-execute anything it marks as done"));
+        // The framing has to precede the memory, or it reads as part of it.
+        assert!(out.find("restored working memory").unwrap() < out.find("carry this").unwrap());
     }
 }

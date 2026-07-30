@@ -48,6 +48,10 @@ rollout filename, which is the id AMTR keys rows by.
    the only way the human learns the current key, so it must not be paraphrased
    away.
 
+   A clone prints no key line, because a clone has no key until the next
+   compaction mints one. When there is no line, there is nothing to report —
+   say nothing about keys rather than explaining their absence.
+
 ## When it prints nothing
 
 The key does not resolve — it was superseded by a later compaction (keys name
