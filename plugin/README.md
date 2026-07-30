@@ -20,9 +20,18 @@ session.
   `amtr recall --amtr-key` for the cross-session case. Compaction
   inside one session needs no key and no skill.
 
-Both hosts run the same `tools/amtr-hook.sh`; the
-`${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}` expansion in `hooks/hooks.json` resolves
-either host's plugin-path variable.
+Both hosts run the same `tools/amtr-hook.sh`, but each declares it in its own
+file: `hooks/hooks.json` for Claude Code, `hooks/codex-hooks.json` for Codex
+(named by the `hooks` key in `.codex-plugin/plugin.json`). The script is shared
+because the work is identical; the declarations are split because what can be
+asserted about each host is not.
+
+Concretely, the Claude Code file sets `timeout` explicitly — 10s for the
+capture hook, which returns as soon as the worker has detached, and 35s for the
+delivery hook, which needs room for the 25s poll plus the read that follows.
+The Codex file sets no timeout, because the unit of that field is not
+documented for Codex and a wrong guess would kill the hook instantly rather
+than fail visibly. Leaving it to the host's default is the honest default.
 
 ## Prerequisites
 
