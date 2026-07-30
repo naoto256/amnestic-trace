@@ -1,4 +1,4 @@
-# AMT extraction prompt
+# Amnestic Trace extraction prompt
 
 You are producing the working-memory handoff for an AI coding session that is
 about to lose its context. What you write is the ONLY thing the session will

@@ -57,6 +57,16 @@ No daemon, no config file, and no environment variable. The extraction prompt
 is materialized at `~/.local/share/amtr/prompt.md` on first run and is yours to
 edit in place.
 
+**Upgrades never touch it.** Once that file exists it is treated as yours, so a
+newer version's default prompt is not written over it — an upgrade cannot
+silently replace prompt text you tuned. The cost is that improvements to the
+default do not reach an existing install either. To take a new default, delete
+the file and let the next run write it:
+
+```sh
+rm ~/.local/share/amtr/prompt.md
+```
+
 ## Install
 
 Both hosts discover plugins through marketplace catalogs, not by scanning

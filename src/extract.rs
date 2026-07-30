@@ -50,7 +50,31 @@ pub fn run(host: Host, input: &str) -> io::Result<String> {
     if !out.status.success() {
         return Err(io::Error::other(format!("extraction agent exited with {}", out.status)));
     }
-    validate(&String::from_utf8_lossy(&out.stdout))
+    validate(&strip_preamble(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Drops anything before the first `##` heading.
+///
+/// Told to emit only the handoff, the extraction agent still narrates its way
+/// into it ("Looking at the journal... let me write this honestly"). That text
+/// then becomes the memory a session wakes up holding, where reasoning about a
+/// past task is indistinguishable from the task. The prompt defines the handoff
+/// as beginning at its first section, so anything earlier is not part of it.
+///
+/// A prompt edited to drop the headings has no first section, and then this
+/// leaves the output alone rather than emptying it.
+fn strip_preamble(raw: &str) -> String {
+    let text = raw.trim_start();
+    // Already at the first section: there is nothing in front of it to drop.
+    // This has to be checked before searching for a heading mid-text, or the
+    // search finds the *second* section and the first one is cut away.
+    if text.starts_with("## ") {
+        return text.to_string();
+    }
+    match text.find("\n## ") {
+        Some(i) => text[i + 1..].to_string(),
+        None => raw.to_string(),
+    }
 }
 
 /// The only gate between a flaky agent run and overwriting working memory.
@@ -89,6 +113,51 @@ mod tests {
     fn accepts_and_trims_a_plausible_handoff() {
         let out = validate("  \nStill fixing the retry loop in fetch().\n  ").unwrap();
         assert_eq!(out, "Still fixing the retry loop in fetch().");
+    }
+
+    #[test]
+    fn narration_before_the_first_section_is_dropped() {
+        let raw = "This is a first-compaction request. Let me look at the journal.\n\n\
+                   I must not fabricate work that did not happen.\n\n\
+                   ## Rules and rulings\nnone\n";
+        let out = strip_preamble(raw);
+        assert!(out.starts_with("## Rules and rulings"), "got: {out}");
+        assert!(!out.contains("Let me look"));
+    }
+
+    #[test]
+    fn output_that_already_starts_at_a_section_is_untouched() {
+        let raw = "## Rules and rulings\nnone\n";
+        assert_eq!(strip_preamble(raw), raw);
+    }
+
+    #[test]
+    fn a_well_formed_handoff_keeps_its_very_first_section() {
+        // Regression: searching for a heading mid-text finds the *second* one,
+        // so obeying the prompt exactly cost the session its standing rules —
+        // the single thing the handoff most needs to carry.
+        let raw = "## Rules and rulings\n- \"never use the Foo library\"\n\n\
+                   ## Task map and position\nfixing the parser\n";
+        let out = strip_preamble(raw);
+        assert!(out.contains("never use the Foo library"), "lost the rules: {out}");
+        assert!(out.contains("## Task map and position"));
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn a_headingless_prompt_keeps_its_output_rather_than_losing_it() {
+        // The prompt is the user's to rewrite; without sections there is no
+        // boundary to cut at, and cutting everything would be worse.
+        let raw = "just a paragraph of handoff text with no headings at all";
+        assert_eq!(strip_preamble(raw), raw);
+    }
+
+    #[test]
+    fn only_the_leading_narration_goes_not_later_sections() {
+        let raw = "preamble\n\n## Rules and rulings\nnone\n\n## Rejected\nnone\n";
+        let out = strip_preamble(raw);
+        assert!(out.contains("## Rejected"));
+        assert!(out.starts_with("## Rules"));
     }
 
     #[test]
