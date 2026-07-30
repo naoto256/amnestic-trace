@@ -77,7 +77,7 @@ hosts.
 ### Claude Code
 
 ```sh
-claude plugin marketplace add naoto256/amnestictrace
+claude plugin marketplace add naoto256/amnestic-trace
 claude plugin install amtr@naoto256-amtr
 ```
 
@@ -91,7 +91,7 @@ claude plugin install amtr@naoto256-amtr
 ### Codex
 
 ```sh
-codex plugin marketplace add naoto256/amnestictrace
+codex plugin marketplace add naoto256/amnestic-trace
 codex plugin add amtr@naoto256-amtr
 ```
 

@@ -1,5 +1,7 @@
 # Amnestic Trace (amtr)
 
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A one-to-one replacement of short-term working memory across a context
 boundary. Two cases only: a session surviving its own compaction, and an
 explicit handoff to another session. What remains relevant is kept, the rest is
@@ -135,3 +137,7 @@ logging its stdin once:
 **6. Handoff.** In session B, run `/amtr <key from session A>`. B should receive
 A's memory; A's row must be gone (`ls` the cortex directory). With `clone`, A's
 row must survive and B's must have `"amtr_key": null`.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

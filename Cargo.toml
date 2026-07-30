@@ -2,7 +2,9 @@
 name = "amtr"
 version = "0.2.0"
 edition = "2021"
-description = "Amnestic Trace: ephemeral replacement memory across a context boundary"
+description = "Ephemeral replacement memory across a context boundary."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/naoto256/amnestic-trace"
 
 # Named `amtr`, not `amt`: macOS ships a root-owned /usr/sbin/amt that wins on a
 # default PATH. Nothing types this by hand — the callers are hooks.
