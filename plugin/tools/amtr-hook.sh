@@ -53,25 +53,6 @@ else
 	amtr_home="$home/.amtr"
 fi
 
-# The binary creates this directory, but the redirect below is opened by the
-# shell *before* the binary runs. On a fresh install the directory does not
-# exist yet, the redirect fails, and a POSIX shell then skips the entire command
-# — so the binary never ran, nothing was created, and the next turn found no
-# marker to bootstrap from. The plugin was inert from installation onward, and
-# silently: the only complaint went to the hook's own stderr, which is the thing
-# the redirect existed to capture.
-#
-# The umask is set in a subshell so both the directory and the log start
-# owner-only. Without it the shell creates them at the ambient umask and the
-# binary's own 0600/0700 intent is defeated by whichever of the two got there
-# first — a store holding session transcripts should not be world-readable for
-# even the moment in between.
-(
-	umask 077
-	mkdir -p "$amtr_home" 2>/dev/null
-	[ -e "$amtr_home/amtr.log" ] || : >>"$amtr_home/amtr.log" 2>/dev/null
-) 2>/dev/null
-
 # Must match `slug()` in src/store.rs exactly, or the reader looks for a marker
 # at a path the writer never wrote. All three of the binary's steps are here:
 # replace anything outside the allowed class, trim leading and trailing dots,
@@ -104,6 +85,45 @@ export PATH
 
 command -v amtr >/dev/null 2>&1 || exit 0
 
+# Everything below this point assumes the binary exists, and so does the store.
+# Creating it earlier meant a machine with the plugin installed but no binary
+# grew a store and an empty log on every turn, which quietly broke the useful
+# inference that a store on disk means this tool has run.
+#
+# The binary creates the store too, but the redirect below is opened by the
+# shell *before* the binary runs. On a fresh install the directory does not
+# exist, the redirect fails, and a POSIX shell then skips the entire command —
+# so the binary never ran, nothing was created, and the next turn found no
+# marker to bootstrap from. The plugin was inert from installation onward, and
+# silently: the only complaint went to the hook's own stderr, which is the very
+# thing the redirect existed to capture.
+#
+# The parent is created separately, at the ambient umask. It is `~/.local/share`
+# or similar — shared with other tools and not ours to tighten, which is exactly
+# what `store::create_dir_private` says on the writer's side. Only the store
+# itself goes to 0700, in a subshell so the umask does not leak.
+mkdir -p "$(dirname "$amtr_home")" 2>/dev/null
+(
+	umask 077
+	mkdir -p "$amtr_home" 2>/dev/null
+	[ -e "$amtr_home/amtr.log" ] || : >>"$amtr_home/amtr.log" 2>/dev/null
+	# An older install may have left this readable. `log_stderr_to`'s O_CREAT
+	# mode only applies to a file it creates, so an existing one keeps whatever
+	# it had — the only thing under the store not brought up to 0600.
+	chmod 600 "$amtr_home/amtr.log" 2>/dev/null
+) 2>/dev/null
+
+# Resolved once, here, rather than written as a redirect on the commands below.
+# A POSIX shell that cannot open a redirect skips the whole command, so with the
+# redirect inline, whether the binary ran at all depended on whether this file
+# happened to be writable. A store restored from an archive under another owner,
+# or a single synthesize that once ran under sudo, was enough to leave the
+# plugin permanently silent on an otherwise healthy system. The binary points
+# its own stderr at the same file as soon as it starts, so falling back here
+# costs a few lines, not the tool.
+log="$amtr_home/amtr.log"
+{ : >>"$log"; } 2>/dev/null || log=/dev/null
+
 case "$event" in
 precompact)
 	journal=$(field transcript_path)
@@ -123,7 +143,7 @@ precompact)
 	# stderr there as soon as it can, but it cannot do that before resolving the
 	# home directory — and "the home directory would not resolve" is exactly the
 	# failure that would otherwise leave no trace at all.
-	amtr synthesize "$session_id" "$journal" >/dev/null 2>>"$amtr_home/amtr.log"
+	amtr synthesize "$session_id" "$journal" >/dev/null 2>>"$log"
 	;;
 recall)
 	# The marker is an undelivered snapshot, not a "compaction happened" flag.
@@ -135,8 +155,16 @@ recall)
 	# it, leaving room for the read that follows; hooks/codex.json declares
 	# none, because the unit of that field is unverified on Codex and a wrong
 	# guess would kill the hook outright rather than fail visibly.
+	# Prefix match: the in-flight token carries the claiming run's identity
+	# (`ongoing:<pid>-<nonce>`) so the binary can tell its own claim from
+	# another's. The reader does not care which run it is, only that one is
+	# working.
 	waited=0
-	while [ "$(cat "$marker" 2>/dev/null)" = "ongoing" ] && [ "$waited" -lt 25 ]; do
+	while [ "$waited" -lt 25 ]; do
+		case "$(cat "$marker" 2>/dev/null)" in
+		ongoing*) ;;
+		*) break ;;
+		esac
 		sleep 1
 		waited=$((waited + 1))
 	done
@@ -165,7 +193,7 @@ recall)
 	# here on every single turn, and discarding the reason made that invisible:
 	# the marker stayed, the turn injected nothing, and nothing anywhere said
 	# why.
-	if amtr recall "$session_id" 2>>"$amtr_home/amtr.log"; then
+	if amtr recall "$session_id" 2>>"$log"; then
 		# Compare the whole claim, not just its shape. A compaction can finish
 		# while this turn is in flight, and its `ready:<newer key>` must not be
 		# discharged by the turn that delivered the older one — which a check
