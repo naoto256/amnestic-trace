@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'release/*']
+  pull_request:
+    branches: [main, 'release/*']
+  workflow_dispatch:
+
+# Minimum required for `actions/checkout` (read the repo). Cache via
+# `Swatinem/rust-cache` works in read-only fallback without an explicit
+# `actions: write` grant. No GitHub API writes from this job.
+#
+# Cache saves are gated on non-PR events (see `save-if:` below). PR runs can
+# restore an existing cache but cannot write one back, so a hostile PR cannot
+# poison the cache a subsequent trusted `push` run would restore.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # pin-audit:2026-06-03 de0fac2 | v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # pin-audit:2026-05-21 29eef33 | stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # pin-audit:2026-05-21 e18b497 | v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  # The hook script is the other half of this tool and is not covered by
+  # `cargo test`: it is what the host actually executes, and a failure in it
+  # fails open and silently, which is precisely the failure this project cannot
+  # detect at runtime by design.
+  #
+  # Syntax checking alone is not enough. A redirection error on a POSIX special
+  # built-in terminates the shell outright — dash does this, bash and zsh do
+  # not — so a hook can parse cleanly everywhere and still die on the first
+  # line of real work on Debian and Ubuntu. Only running it catches that, which
+  # is what the regression script does, under each shell it finds.
+  hook-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # pin-audit:2026-06-03 de0fac2 | v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Shell syntax
+        run: |
+          sh -n plugin/tools/amtr-hook.sh
+          dash -n plugin/tools/amtr-hook.sh
+
+      - name: Hook behaviour
+        run: tests/hook-regressions.sh
+
+
+  # `cargo deny` gates every dimension deny.toml covers — RustSec advisories,
+  # duplicate and wildcard dependencies, source restrictions, license policy —
+  # against Cargo.lock. Pinned and `--locked` so the gate is itself
+  # reproducible: a floating tool version could silently change what "pass"
+  # means.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # pin-audit:2026-06-03 de0fac2 | v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # pin-audit:2026-05-21 29eef33 | stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # pin-audit:2026-05-21 e18b497 | v2
+        with:
+          key: supply-chain
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Install cargo-deny
+        run: cargo install --locked --version 0.18.6 cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check advisories bans sources licenses
+
+  # The manifests decide whether either host loads anything at all. They are
+  # data, so nothing else in this pipeline would notice a trailing comma or a
+  # path that no longer resolves.
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # pin-audit:2026-06-03 de0fac2 | v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: JSON is well-formed
+        run: |
+          for f in .claude-plugin/marketplace.json \
+                   plugin/.claude-plugin/plugin.json \
+                   plugin/.codex-plugin/plugin.json \
+                   plugin/hooks/claude.json \
+                   plugin/hooks/codex.json; do
+            python3 -m json.tool "$f" > /dev/null
+          done
+
+      # Each manifest names its hook file explicitly; neither host falls back
+      # to a convention, so a rename that missed one would silently disable
+      # that host.
+      - name: Declared hook files exist
+        run: |
+          for manifest in plugin/.claude-plugin/plugin.json plugin/.codex-plugin/plugin.json; do
+            rel=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['hooks'])" "$manifest")
+            test -f "plugin/${rel#./}" || { echo "missing: $manifest -> $rel"; exit 1; }
+          done
+
+      # The version appears in three places and they are read by three
+      # different consumers; a release tagged against a stale one installs the
+      # wrong thing.
+      - name: Versions agree
+        run: |
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          for manifest in plugin/.claude-plugin/plugin.json plugin/.codex-plugin/plugin.json; do
+            got=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['version'])" "$manifest")
+            test "$got" = "$crate" || { echo "$manifest is $got, Cargo.toml is $crate"; exit 1; }
+          done

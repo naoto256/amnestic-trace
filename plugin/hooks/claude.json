@@ -1,0 +1,31 @@
+{
+  "description": "AMT PreCompact capture + turn-start injection (Claude Code). Codex reads hooks/codex.json instead; the two differ only in what each can safely assert about timeouts.",
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/tools/amtr-hook.sh\" precompact",
+            "statusMessage": "AMT: capturing working memory",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/tools/amtr-hook.sh\" recall",
+            "statusMessage": "AMT: restoring working memory",
+            "timeout": 35
+          }
+        ]
+      }
+    ]
+  }
+}

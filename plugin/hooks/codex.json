@@ -1,0 +1,29 @@
+{
+  "description": "AMT PreCompact capture + turn-start injection (Codex). Declared separately from hooks/claude.json because the two hosts differ in what can be asserted here, not because the work differs — both run the same tools/amtr-hook.sh.",
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" precompact",
+            "statusMessage": "AMT: capturing working memory"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" recall",
+            "statusMessage": "AMT: restoring working memory"
+          }
+        ]
+      }
+    ]
+  }
+}

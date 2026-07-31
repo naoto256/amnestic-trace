@@ -2,3 +2,18 @@
 .DS_Store
 .uchgs/
 *.swp
+
+# Never committable. Nothing here needs a credential, so anything matching these
+# arrived by accident — which is exactly when a backstop earns its keep.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.p8
+id_rsa*
+
+# Host session journals. The manual verification steps involve pointing this
+# tool at real transcripts, so one landing in the working tree is a plausible
+# slip — and a transcript is the most sensitive thing in reach.
+*.jsonl

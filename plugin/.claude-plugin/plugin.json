@@ -1,0 +1,9 @@
+{
+  "name": "amtr",
+  "description": "Amnestic Trace — replaces a session's short-term working memory across a context boundary. Wires a PreCompact hook that detaches an extraction worker, a turn-start hook that injects the result, and the /amtr skill for cross-session handoff.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Naoto Morishima"
+  },
+  "hooks": "./hooks/claude.json"
+}

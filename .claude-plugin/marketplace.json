@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "naoto256-amtr",
+  "description": "Amnestic Trace — ephemeral replacement memory across a context boundary.",
+  "owner": {
+    "name": "Naoto Morishima"
+  },
+  "plugins": [
+    {
+      "name": "amtr",
+      "description": "Replaces a session's short-term working memory across compaction, and hands it to another session on request. A PreCompact hook starts a detached extraction over the journal since the last compaction; the next turn-start hook injects the result, because neither host can inject context from a compaction hook. Adds the /amtr skill for cross-session handoff.",
+      "author": {
+        "name": "Naoto Morishima"
+      },
+      "source": "./plugin"
+    }
+  ]
+}
