@@ -10,7 +10,7 @@ Pre-1.0 releases may introduce breaking changes freely as the storage layout and
 
 ## [0.1.0] - 2026-07-31
 
-> Replacement memory across a context boundary.
+> working memory that survives compaction
 
 ### Added — replacement memory across a context boundary
 
@@ -53,8 +53,16 @@ interface.
 
 ### Notes
 
-The executable is `amtr` rather than `amt` because macOS ships an unrelated
-root-owned `/usr/sbin/amt` that wins on a default `PATH`.
+The store is `~/.local/share/amtr` when `~/.local` exists and `~/.amtr`
+otherwise, except that an existing store always wins — the rule is evaluated at
+every process start, so a `~/.local` that appears later must not leave earlier
+rows behind. A command that needs a session refuses an empty session id, since
+an unset host variable would otherwise file a snapshot where nothing asks for
+it. No configurable environment variable takes part in either.
+
+What the extraction agent can reach differs by host, and on the Codex path it
+is not closed: hosted tools and configured MCP servers run outside the sandbox.
+`plugin/README.md` carries the measurements.
 
 Stored memory is deliberately ephemeral. Every failure path writes nothing to
 stdout, so the host injects nothing and the turn proceeds, on the principle that

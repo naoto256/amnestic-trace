@@ -9,9 +9,6 @@ repository = "https://github.com/naoto256/amnestic-trace"
 # stray `cargo publish` fails instead of succeeding.
 publish = false
 
-# Named `amtr`, not `amt`: macOS ships a root-owned /usr/sbin/amt that wins on a
-# default PATH. Nothing types this by hand — the callers are hooks.
-
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 libc = "0.2"

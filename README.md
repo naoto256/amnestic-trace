@@ -20,9 +20,6 @@ amtr recall <session_id> --amtr-key <key>      # cross-session handoff (MOVE)
 amtr recall <session_id> --amtr-key <key> --clone
 ```
 
-The binary is `amtr`, not `amt`, because macOS ships an unrelated root-owned
-`/usr/sbin/amt` that wins on a default `PATH`.
-
 `synthesize` writes a marker, detaches by double fork, and returns, so
 extraction runs in parallel with compaction itself.
 

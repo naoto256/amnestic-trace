@@ -51,9 +51,6 @@ than fail visibly. Leaving it to the host's default is the honest default.
   execution inherits a minimal `PATH` that omits them. Appended rather than
   prepended, so nothing here shadows the system's own tools.
 
-  The name is `amtr` rather than `amt` because macOS ships an unrelated
-  root-owned `/usr/sbin/amt` that wins on a default `PATH`.
-
 - The host CLI that produced the journal (`claude` or `codex`) must be on
   `PATH` and authenticated — that is what performs the extraction. amtr reads
   the journal to decide which one to launch and never holds credentials itself.
