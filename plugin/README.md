@@ -40,16 +40,17 @@ than fail visibly. Leaving it to the host's default is the honest default.
 
 ## Prerequisites
 
-- `amtr` on `PATH`. Build and install it from the repo root:
+- `amtr` on `PATH`:
 
   ```sh
-  cargo install --path .
+  brew install naoto256/amnestic-trace/amtr
   ```
 
-  That puts `amtr` in `~/.cargo/bin`. `~/.local/bin` works too; the hook script
-  appends both, plus the Homebrew and `/usr/local` prefixes, because hook
-  execution inherits a minimal `PATH` that omits them. Appended rather than
-  prepended, so nothing here shadows the system's own tools.
+  `cargo install --path .` from the repo root works too, as does dropping a
+  release binary in `~/.local/bin`. The hook script appends all three prefixes,
+  plus `/usr/local`, because hook execution inherits a minimal `PATH` that omits
+  them. Appended rather than prepended, so nothing here shadows the system's own
+  tools.
 
 - The host CLI that produced the journal (`claude` or `codex`) must be on
   `PATH` and authenticated — that is what performs the extraction. amtr reads

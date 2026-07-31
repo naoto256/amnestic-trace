@@ -1,5 +1,5 @@
 {
-  "description": "AMT PreCompact capture + turn-start injection (Codex). Declared separately from hooks/claude.json because the two hosts differ in what can be asserted here, not because the work differs — both run the same tools/amtr-hook.sh.",
+  "description": "Amnestic Trace PreCompact capture + turn-start injection (Codex). Declared separately from hooks/claude.json because the two hosts differ in what can be asserted here, not because the work differs — both run the same tools/amtr-hook.sh.",
   "hooks": {
     "PreCompact": [
       {
@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" precompact",
-            "statusMessage": "AMT: capturing working memory"
+            "statusMessage": "Amnestic Trace: capturing working memory"
           }
         ]
       }
@@ -20,7 +20,7 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" recall",
-            "statusMessage": "AMT: restoring working memory"
+            "statusMessage": "Amnestic Trace: restoring working memory"
           }
         ]
       }

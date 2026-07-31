@@ -1,5 +1,5 @@
 #!/bin/sh
-# AMT hook entry point for both Claude Code and Codex.
+# Amnestic Trace hook entry point for both Claude Code and Codex.
 #
 #   amtr-hook.sh precompact   <- PreCompact:        start a detached synthesize
 #   amtr-hook.sh recall       <- UserPromptSubmit:  inject the replacement memory

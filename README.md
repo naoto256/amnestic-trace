@@ -99,16 +99,25 @@ amtr default-prompt > ~/.local/share/amtr/prompt.md
 ## Install
 
 ```sh
-cargo install --path .
+brew install naoto256/amnestic-trace/amtr
 ```
 
-Or take a prebuilt binary from a release, verifying it first:
+The formula takes the same release binary described below, with the same
+checksums; the tap is [naoto256/homebrew-amnestic-trace](https://github.com/naoto256/homebrew-amnestic-trace).
+
+To place that binary yourself instead, verify it first:
 
 ```sh
 tar -xzf amtr-v0.1.0-aarch64-apple-darwin.tar.gz
 sha256sum -c SHA256SUMS        # shasum -a 256 -c on macOS
 mkdir -p ~/.local/bin          # install does not create it
 install -m 755 amtr ~/.local/bin/amtr
+```
+
+Or build from source, which is also how you run a modified copy:
+
+```sh
+cargo install --path .
 ```
 
 Then install the plugin, which wires the hooks that call the binary:
