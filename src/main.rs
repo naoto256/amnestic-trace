@@ -83,19 +83,17 @@ fn synthesize(session_id: &str, journal: &Path) -> io::Result<Status> {
     let journal = journal
         .canonicalize()
         .unwrap_or_else(|_| journal.to_path_buf());
-    // Whatever the marker said before this run claimed it. Captured here and
-    // carried through, because after the overwrite it is unrecoverable.
-    let (prior, claim) = store.mark_ongoing(session_id)?;
+    store.mark_ongoing(session_id)?;
 
     match detach::detach() {
         detach::Role::Caller => return Ok(Status::Nothing), // hook: returns now
         detach::Role::Worker => {}
         // Doing 600 seconds of work inside a hook that is killed at 10 is not a
-        // fallback, it is a hang. Give the marker back and let the next
-        // compaction try, which is what the rest of this design assumes anyway.
+        // fallback, it is a hang. Drop the marker and let the next compaction
+        // try, which is what the rest of this design assumes anyway.
         detach::Role::CannotDetach => {
             eprintln!("{}: could not detach; giving up this window", store::now());
-            restore_or_report(&store, session_id, prior.as_deref(), &claim);
+            drop_marker(&store, session_id);
             return Ok(Status::Nothing);
         }
     }
@@ -110,7 +108,7 @@ fn synthesize(session_id: &str, journal: &Path) -> io::Result<Status> {
         // always finishes before the user's next prompt, so a worker that
         // cleared its own marker would leave nothing to deliver against.
         Ok(key) => {
-            if let Err(e) = store.mark_ready_retrying(session_id, &key) {
+            if let Err(e) = store.mark_ready(session_id, &key) {
                 // The row is on disk but nothing will ever come for it. This is
                 // the one failure that looks like success from the outside.
                 eprintln!(
@@ -118,36 +116,31 @@ fn synthesize(session_id: &str, journal: &Path) -> io::Result<Status> {
                      {session_id} is stranded until the next compaction: {e}",
                     store::now()
                 );
+                drop_marker(&store, session_id);
                 return Err(e);
             }
             Ok(Status::Nothing)
         }
-        // One disposition for every failure: withdraw this run's claim. There
-        // is no per-reason branch because there is no per-reason behavior — an
-        // earlier version had four failure kinds feeding two arms that did the
-        // same thing, plus a special case for "nothing was attempted" that was
-        // wrong because `mark_ongoing` had already written regardless.
-        //
-        // `restore_marker` decides what withdrawing means, and it is narrower
-        // than it sounds: only if this run still owns the marker, and only a
-        // `ready:` prior is put back. See its doc for why both conditions are
-        // load-bearing under concurrency.
+        // One disposition for every failure, because the memory is ephemeral:
+        // there is simply no memory this time. The transcript survives and the
+        // next compaction rebuilds from it, so there is nothing here worth a
+        // recovery mechanism.
         Err(failure) => {
             eprintln!("{}: {failure}", store::now());
-            restore_or_report(&store, session_id, prior.as_deref(), &claim);
+            drop_marker(&store, session_id);
             Ok(Status::Nothing)
         }
     }
 }
 
-/// Restoring the marker is itself a store write, and a silent failure here
-/// leaves `ongoing` behind — which taxes every later turn with the full poll
-/// before it fails open. Too expensive to discard.
-fn restore_or_report(store: &Store, session_id: &str, prior: Option<&str>, claim: &str) {
-    if let Err(e) = store.restore_marker(session_id, prior, claim) {
+/// Clearing the marker is itself a store write, and a silent failure leaves
+/// `ongoing` behind — which taxes every later turn with the full poll before it
+/// fails open. Too expensive to discard.
+fn drop_marker(store: &Store, session_id: &str) {
+    if let Err(e) = store.unmark(session_id) {
         eprintln!(
-            "{}: could not restore the marker for {session_id}; later turns may \
-             wait out the poll until it is cleared: {e}",
+            "{}: could not clear the marker for {session_id}; later turns may \
+             wait out the poll until it is gone: {e}",
             store::now()
         );
     }

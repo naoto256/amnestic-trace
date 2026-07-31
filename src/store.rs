@@ -187,31 +187,22 @@ impl Store {
         Ok(copy)
     }
 
-    /// The marker is an undelivered debt, not a "compaction happened" flag.
+    /// The marker is an undelivered snapshot, not a "compaction happened" flag.
     ///
-    /// `ongoing` means extraction is in flight. `ready:<amtr_key>` means a
-    /// specific snapshot is waiting to be injected — the key is part of the
-    /// state, not decoration. Without it, two things that must be told apart
-    /// look identical: the debt this run created, and a debt an earlier
-    /// compaction left undelivered. Every write goes through the same atomic
-    /// path, so a reader polling here sees one state word or another, never a
-    /// half-written one.
-    /// Returns what the marker said before, and the token identifying this
-    /// run's claim.
+    /// Three states and no more: `ongoing` while extraction is in flight,
+    /// `ready:<amtr_key>` for a snapshot waiting to be injected, and absent for
+    /// nothing owed. The key is part of the state rather than decoration —
+    /// it is what lets the reader discharge the exact snapshot it delivered
+    /// and leave a newer one that landed mid-turn alone. Every write goes
+    /// through the same atomic path, so a polling reader sees one state or the
+    /// other, never a half-written one.
     ///
-    /// The token is what makes restoring safe under concurrency. Two
-    /// compactions of the same session can overlap, and without a way to tell
-    /// whose claim is currently on disk, a slow failing run will happily undo a
-    /// fast successful one that overtook it.
-    pub fn mark_ongoing(&self, session_id: &str) -> io::Result<(Option<String>, String)> {
-        // The previous state is handed back so the caller can put it right if
-        // this synthesize fails. Overwriting is correct when it succeeds — the
-        // new snapshot supersedes the old — but on failure the old row is still
-        // on disk, and destroying its marker orphans it forever.
-        let prior = fs::read_to_string(self.marker_path(session_id)).ok();
-        let claim = format!("ongoing:{}-{}", std::process::id(), base36(random_u64()));
-        write_atomic(&self.marker_path(session_id), claim.as_bytes())?;
-        Ok((prior, claim))
+    /// A failed synthesize simply deletes the marker. The memory is ephemeral:
+    /// there is no memory this time, the transcript survives, and the next
+    /// compaction rebuilds from it. Nothing here keeps an older generation
+    /// alive on the strength of a newer one having failed.
+    pub fn mark_ongoing(&self, session_id: &str) -> io::Result<()> {
+        write_atomic(&self.marker_path(session_id), b"ongoing")
     }
 
     pub fn mark_ready(&self, session_id: &str, amtr_key: &str) -> io::Result<()> {
@@ -219,63 +210,6 @@ impl Store {
             &self.marker_path(session_id),
             format!("ready:{amtr_key}").as_bytes(),
         )
-    }
-
-    /// A row written but never marked deliverable is unreachable: the reader
-    /// only looks when a marker says to. Worth a few attempts before giving up,
-    /// since the usual cause is transient.
-    pub fn mark_ready_retrying(&self, session_id: &str, amtr_key: &str) -> io::Result<()> {
-        let mut last = None;
-        for attempt in 0..3 {
-            match self.mark_ready(session_id, amtr_key) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    last = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
-                }
-            }
-        }
-        Err(last.unwrap_or_else(|| io::Error::other("could not mark deliverable")))
-    }
-
-    /// Undoes this run's claim — and only this run's claim.
-    ///
-    /// Two rules, both learned from getting it wrong:
-    ///
-    /// First, compare before writing. The captured `prior` can be arbitrarily
-    /// stale: a second compaction may have started, finished, and published a
-    /// snapshot while this one was still failing. Restoring blindly then
-    /// deletes a marker that belongs to a newer, deliverable row, which goes
-    /// undelivered forever with nothing reporting it. So the marker is read
-    /// back, and if it no longer holds this run's token, someone else owns it
-    /// and it is left alone.
-    ///
-    /// Second, never restore an `ongoing`. A captured `ongoing` belongs to some
-    /// other in-flight run; writing it back produces a marker pointing at a
-    /// worker that may already be gone, and every later turn then waits out the
-    /// full poll for a snapshot that is never coming. That other run will
-    /// restore its own claim when it finishes. Only a `ready:` prior represents
-    /// a real debt worth putting back; anything else means nothing was owed.
-    pub fn restore_marker(
-        &self,
-        session_id: &str,
-        prior: Option<&str>,
-        claim: &str,
-    ) -> io::Result<()> {
-        let current = fs::read_to_string(self.marker_path(session_id)).ok();
-        if current.as_deref() != Some(claim) {
-            eprintln!(
-                "{}: another run owns the marker for {session_id}; leaving it alone",
-                now()
-            );
-            return Ok(());
-        }
-        match prior {
-            Some(state) if state.starts_with("ready:") => {
-                write_atomic(&self.marker_path(session_id), state.as_bytes())
-            }
-            _ => self.unmark(session_id),
-        }
     }
 
     /// Test-only: at runtime the reader is the hook script, which is shell, so
@@ -579,11 +513,8 @@ mod tests {
     #[test]
     fn delivery_runs_ongoing_then_ready_then_gone() {
         let s = scratch();
-        let (_, claim) = s.mark_ongoing("a").unwrap();
-        // Carries the claiming run's identity, so a concurrent run can tell
-        // whether the marker is still its own.
-        assert_eq!(s.marker_state("a").as_deref(), Some(claim.as_str()));
-        assert!(claim.starts_with("ongoing:"));
+        s.mark_ongoing("a").unwrap();
+        assert_eq!(s.marker_state("a").as_deref(), Some("ongoing"));
 
         // The worker finishes; the debt becomes deliverable but stays owed, and
         // names which snapshot it owes.
@@ -610,92 +541,15 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_synthesize_does_not_discard_an_older_undelivered_snapshot() {
-        // Goes through `mark_ongoing`, which is the whole point. The previous
-        // version of this test called the withdraw path directly and passed
-        // while the real sequence destroyed the older debt: `mark_ongoing` had
-        // already overwritten `ready` with `ongoing`, so the guard that only
-        // removed `ongoing` was reading its own handwriting.
+    fn a_failed_synthesize_leaves_nothing_owed() {
+        // The ephemeral model: a failure means there is no memory this time,
+        // not that an older one is resurrected. Leaving `ongoing` behind would
+        // be the one unacceptable outcome — every later turn would sit through
+        // the full poll waiting for a worker that is already gone.
         let s = scratch();
-        s.save(&row("a", Some("amtr-old"), "earlier snapshot"))
-            .unwrap();
-        s.mark_ready("a", "amtr-old").unwrap();
-
-        // A later compaction claims the marker, then fails.
-        let (prior, claim) = s.mark_ongoing("a").unwrap();
-        assert_eq!(prior.as_deref(), Some("ready:amtr-old"));
-        s.restore_marker("a", prior.as_deref(), &claim).unwrap();
-
-        assert_eq!(
-            s.marker_state("a").as_deref(),
-            Some("ready:amtr-old"),
-            "an earlier compaction's undelivered snapshot must survive"
-        );
-        assert_eq!(s.load("a").unwrap().unwrap().handoff, "earlier snapshot");
-    }
-
-    #[test]
-    fn a_failed_synthesize_withdraws_its_own_claim_when_nothing_was_owed() {
-        let s = scratch();
-        let (prior, claim) = s.mark_ongoing("a").unwrap();
-        assert_eq!(prior, None, "nothing was owed before this run");
-        s.restore_marker("a", prior.as_deref(), &claim).unwrap();
-        assert_eq!(
-            s.marker_state("a"),
-            None,
-            "leaving `ongoing` would make every later turn sit through the poll"
-        );
-    }
-
-    #[test]
-    fn a_slow_failure_does_not_erase_a_faster_run_that_overtook_it() {
-        // Two compactions of one session overlap. The slow one starts first
-        // with nothing owed, the fast one finishes and publishes a snapshot,
-        // then the slow one fails. Restoring its captured `prior` blindly would
-        // delete a marker naming a row that is on disk and deliverable — and
-        // nothing would ever come back for it.
-        let s = scratch();
-        let (slow_prior, slow_claim) = s.mark_ongoing("a").unwrap();
-        assert_eq!(slow_prior, None);
-
-        // The fast run claims, succeeds, and publishes.
-        let (_, _fast_claim) = s.mark_ongoing("a").unwrap();
-        s.save(&row("a", Some("amtr-fast"), "fresh snapshot"))
-            .unwrap();
-        s.mark_ready("a", "amtr-fast").unwrap();
-
-        // Now the slow one fails.
-        s.restore_marker("a", slow_prior.as_deref(), &slow_claim)
-            .unwrap();
-
-        assert_eq!(
-            s.marker_state("a").as_deref(),
-            Some("ready:amtr-fast"),
-            "a run that no longer owns the marker must not touch it"
-        );
-    }
-
-    #[test]
-    fn a_captured_ongoing_is_never_written_back() {
-        // The reverse overlap: the fast run succeeds first, the slow one
-        // captured the fast run's `ongoing` as its prior. Restoring that
-        // literally would leave a marker pointing at a worker that has already
-        // finished, and every later turn would wait out the full poll for a
-        // snapshot nobody is producing.
-        let s = scratch();
-        let (_, fast_claim) = s.mark_ongoing("a").unwrap();
-        let (slow_prior, slow_claim) = s.mark_ongoing("a").unwrap();
-        assert_eq!(slow_prior.as_deref(), Some(fast_claim.as_str()));
-
-        s.restore_marker("a", slow_prior.as_deref(), &slow_claim)
-            .unwrap();
-
-        assert_eq!(
-            s.marker_state("a"),
-            None,
-            "only a `ready:` prior is a real debt; an `ongoing` belongs to \
-             whoever wrote it and they will clear it themselves"
-        );
+        s.mark_ongoing("a").unwrap();
+        s.unmark("a").unwrap();
+        assert_eq!(s.marker_state("a"), None);
     }
 
     #[test]

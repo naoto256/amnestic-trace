@@ -155,14 +155,10 @@ recall)
 	# it, leaving room for the read that follows; hooks/codex.json declares
 	# none, because the unit of that field is unverified on Codex and a wrong
 	# guess would kill the hook outright rather than fail visibly.
-	# Prefix match: the in-flight token carries the claiming run's identity
-	# (`ongoing:<pid>-<nonce>`) so the binary can tell its own claim from
-	# another's. The reader does not care which run it is, only that one is
-	# working.
 	waited=0
 	while [ "$waited" -lt 25 ]; do
 		case "$(cat "$marker" 2>/dev/null)" in
-		ongoing*) ;;
+		ongoing) ;;
 		*) break ;;
 		esac
 		sleep 1

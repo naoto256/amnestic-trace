@@ -32,8 +32,7 @@ names the snapshot it owes, so one debt can be told from another:
 ```
 ongoing            synthesize started -> reader polls
 ready:<amtr_key>   row written        -> reader injects, then deletes the marker
-gone               delivered, or this attempt failed with nothing owed before it
-ready:<older key>  this attempt failed and an older debt was owed -> see below
+gone               delivered, or the attempt failed
 ```
 
 The distinction matters because extraction usually finishes long before the
@@ -43,15 +42,10 @@ injected — the marker has to outlive the worker and be discharged by whoever
 consumes it. A worker that lands after a timed-out reader gave up rewrites
 `ready`, and the turn after that delivers it.
 
-A failing synthesize does **not** always end at `gone`. Starting one overwrites
-the marker with `ongoing`, so if a previous compaction's snapshot was still
-undelivered, that claim would be destroyed by a later attempt that achieved
-nothing. Instead each attempt remembers what the marker said before it claimed
-it, and on any failure puts that back: `gone` when nothing was owed,
-`ready:<older key>` when something was. The older snapshot is then delivered on
-the next turn, as it should have been. This is the case the whole two-state
-marker exists for — a compaction that finds nothing new must not cost you the
-memory from the one before it.
+A failing synthesize deletes the marker and says so in the log. That is the
+whole of it: the memory is ephemeral, so a failed extraction means there is no
+memory this time, not that an older one is kept alive. The transcript survives
+and the next compaction rebuilds from it.
 
 Because the key is part of the marker, a reader discharges only the exact debt
 it delivered. A snapshot that lands mid-turn is a different claim and survives.
