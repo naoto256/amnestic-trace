@@ -107,14 +107,26 @@ from this same directory. Hooks must also be enabled in `~/.codex/config.toml`:
 
 ```toml
 [features]
-codex_hooks = true
+hooks = true
 ```
 
-Restart the session on either host so the hooks take effect.
+(Older Codex builds called this `codex_hooks`; that spelling still loads but
+warns that it is deprecated.)
 
-Codex installs a **copy** into `~/.codex/plugins/cache/`, so editing this
-directory does not change what runs until the marketplace snapshot is
-refreshed (`codex plugin marketplace upgrade naoto256-amtr`).
+Restart the session on either host so the hooks take effect. The first
+interactive Codex session after installing will ask you to review and trust the
+new hooks before it will run them — hooks run outside its sandbox, so Codex
+requires a human to approve them and no amount of configuration skips that.
+
+For a marketplace added from a local directory, Codex runs the plugin **from
+that directory**, not from the copy under `~/.codex/plugins/cache/`. Editing the
+source takes effect on the next session; editing the cache does nothing. A
+Git-backed marketplace behaves the other way around and needs
+`codex plugin marketplace upgrade naoto256-amtr` to pick up changes.
+
+`codex exec` emits `SessionStart` but not `UserPromptSubmit`, so the delivery
+hook does not run non-interactively. Capture and delivery are both interactive-
+session behavior.
 
 ## Uninstall
 
