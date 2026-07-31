@@ -70,39 +70,38 @@ try to steer whatever reads it.
   unavailable rather than merely unapproved, and `--strict-mcp-config` with no
   config supplied leaves no MCP servers. Verified by running it: the model can
   describe a command it would like to run, and cannot run one.
-- **Codex**: there is no single "no tools" switch, so capabilities come off one
-  at a time — `--sandbox read-only` (no writes), `-c features.shell_tool=false`
-  (no shell), `-c mcp_servers={}` (none of your configured MCP servers).
+- **Codex**: launched with `--sandbox read-only` (no writes) and
+  `-c features.shell_tool=false` (no shell). `-c mcp_servers={}` is also passed
+  and **does not work**: current Codex accepts the setting and starts your
+  configured MCP servers anyway.
 
-  The MCP override is the one that matters. Measured with a canary file outside
-  the working directory: with the shell disabled but the server table left
-  alone, the agent read the canary through a Node REPL server configured in
-  `~/.codex` — losing the shell just meant a different tool was used instead.
-  With the table emptied, Codex's own log shows no server starting and the file
-  is not read.
+  **So if you have MCP servers configured in `~/.codex`, the extraction agent
+  can read any file you can read.** Removing the shell only moves the work to
+  whichever configured server is general-purpose enough — measured, a Node REPL
+  server read a canary file outside the working directory, with both overrides
+  applied. A control run without the MCP override behaved identically, so the
+  setting makes no difference.
 
-  Outbound network is closed too: an HTTPS request to a hostname fails at name
+  Outbound network is closed: an HTTPS request to a hostname fails at name
   resolution (`curl` exits 6). A raw-address route was not tested, so read that
   as name resolution not working rather than proof that nothing can leave.
 
-**How much to trust the Codex side.** The MCP override worked in every run
-here, but it depends on behaviour Codex does not document, and the same
-override has been seen elsewhere accepted without taking effect. Treat it as a
-lock worth fitting rather than one worth relying on.
+**What this means for the Codex path.** Journal text that successfully steers
+the extraction agent can have it read a file and fold the contents into the
+handoff, which is injected into your next turn — where you would see it. It
+cannot write anything and cannot reach the network. So the realistic failure is
+unwanted material appearing in your own context, not leaving your machine.
 
-If it does not hold on your machine, the residual exposure is bounded: the
-agent could read files you can already read and fold them into the handoff,
-which is injected into your next turn — where you would see it. It cannot write
-anything and cannot send anything out. So the realistic failure is unwanted
-material appearing in your own context, not leaving your machine.
+If you want this closed rather than bounded, either use the Claude Code path,
+where the agent genuinely has no tools, or point Codex at a `CODEX_HOME` that
+carries authentication and defines no MCP servers — at the cost of maintaining
+a second Codex home.
 
-To check on your own setup, run the extraction command by hand against a canary
-file outside the working directory and see whether it comes back.
-
-If you want it strictly closed, prefer the Claude Code path, or point Codex at
-a minimal `CODEX_HOME` that carries authentication and defines no MCP servers —
-containment held under that arrangement in testing, at the cost of managing a
-second Codex home.
+To check your own setup, run the extraction command by hand against a canary
+file outside the working directory and see whether it comes back. Phrase the
+prompt as an instruction rather than a question: given an easy way to decline,
+the agent may simply decline, and a file that was not read is not evidence that
+it could not have been.
 
 The agent runs in an empty temporary directory, deleted afterwards, so nothing
 belonging to this tool — other sessions' handoffs, their keys, the prompt — sits
