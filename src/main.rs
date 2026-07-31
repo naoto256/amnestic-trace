@@ -41,6 +41,11 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
 
+    if names_no_session(argv.as_slice()) {
+        eprintln!("amtr: empty session id — the host's session variable is unset");
+        return ExitCode::from(2);
+    }
+
     let outcome = match argv.as_slice() {
         ["synthesize", session_id, journal] => synthesize(session_id, Path::new(journal)),
         ["recall", session_id] => recall(session_id),
@@ -68,6 +73,18 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Whether a command that needs a session was given an empty one.
+///
+/// An empty session id is what an unset host variable expands to, and it names
+/// a session as surely as any other string would: `slug` maps it to `_`, so an
+/// adopt against it moves a snapshot to a row nothing will ever ask for — and
+/// the move is the default. The caller is a hook or a skill interpolating a
+/// variable it did not check, so this is the last boundary where the mistake is
+/// still legible as one.
+fn names_no_session(argv: &[&str]) -> bool {
+    matches!(argv, ["synthesize" | "recall", "", ..])
 }
 
 /// PreCompact path. Writes the marker in the original process so the marker is
@@ -152,9 +169,15 @@ fn drop_marker(store: &Store, session_id: &str) {
 /// Returns the key of the snapshot it wrote, which becomes part of the marker
 /// so the debt can be told apart from any other.
 fn work(store: &Store, session_id: &str, journal: &Path) -> Result<String, extract::Failed> {
-    // A row that cannot be read is reported rather than silently treated as a
-    // first compaction, which would re-summarize the whole journal and quietly
-    // drop everything carried so far.
+    // A row that cannot be read *is* treated as a first compaction: the whole
+    // journal is re-summarized and everything carried so far is dropped, and
+    // the replacement overwrites the row that could not be read. The log line
+    // is the only thing that separates this from a genuine first compaction,
+    // and it is deliberately the whole remedy — the alternative, refusing to
+    // proceed, would leave the session with no memory at all rather than with
+    // memory that starts over. A second path is quieter still: a
+    // `compacted_at` that does not parse leaves `journal::slice` with no
+    // boundary, so the window is the whole journal again with nothing said.
     let prior = match store.load(session_id) {
         Ok(row) => row,
         Err(e) => {
@@ -354,6 +377,27 @@ mod tests {
             handoff: "  carry this  ".into(),
             compacted_at: "2026-07-31T00:00:00.000Z".into(),
         }
+    }
+
+    #[test]
+    fn an_unset_host_variable_cannot_move_a_snapshot_to_a_nameless_row() {
+        // `--amtr-key` first: an adopt is a MOVE by default, so this is the one
+        // that loses a snapshot rather than merely failing to find one.
+        assert!(names_no_session(&["recall", "", "--amtr-key", "amtr-k"]));
+        assert!(names_no_session(&[
+            "recall",
+            "",
+            "--amtr-key",
+            "amtr-k",
+            "--clone"
+        ]));
+        assert!(names_no_session(&["recall", ""]));
+        assert!(names_no_session(&["synthesize", "", "/tmp/j.jsonl"]));
+
+        assert!(!names_no_session(&["recall", "019efc46-72c1-7aa2"]));
+        assert!(!names_no_session(&["synthesize", "s", "/tmp/j.jsonl"]));
+        // Takes no session, so it has none to be empty.
+        assert!(!names_no_session(&["default-prompt"]));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# AMT Plugin
+# Amnestic Trace Plugin
 
 Amnestic Trace replaces a session's short-term working memory across a context
 boundary. This plugin wires the two hooks that make that automatic on both
@@ -15,9 +15,11 @@ session.
 - **`UserPromptSubmit` hook** (`tools/amtr-hook.sh recall`). This is where the
   post-compaction half actually happens: neither host can inject context from a
   compaction hook, so the snapshot is delivered at the next turn start. The
-  hook waits while extraction is still running, gives up after 25s injecting
-  nothing, and deletes the marker only once `amtr recall` reports that it
-  actually printed a handoff — exit 0 means delivered, 1 means nothing was.
+  hook waits while extraction is still running and gives up after 25s,
+  injecting nothing and clearing the marker so later turns do not sit through
+  the poll again. On the delivering path the marker is cleared only once
+  `amtr recall` reports that it actually printed a handoff — exit 0 means
+  delivered, 1 means nothing was.
 - **`/amtr` skill** (`skills/amtr/`). A thin wrapper over
   `amtr recall --amtr-key` for the cross-session case. Compaction
   inside one session needs no key and no skill.
@@ -53,7 +55,7 @@ than fail visibly. Leaving it to the host's default is the honest default.
   root-owned `/usr/sbin/amt` that wins on a default `PATH`.
 
 - The host CLI that produced the journal (`claude` or `codex`) must be on
-  `PATH` and authenticated — that is what performs the extraction. AMT reads
+  `PATH` and authenticated — that is what performs the extraction. amtr reads
   the journal to decide which one to launch and never holds credentials itself.
 
 ## What the extraction agent can do
@@ -106,11 +108,14 @@ contents off your machine**. It cannot write locally, and whatever it folds
 into the handoff you would see in your next turn — but exfiltration does not
 need the handoff, and the network path does not go through the sandbox.
 
-This is stated so you can decide, not because it is fixed. If you want it
-closed rather than described, either use the Claude Code path, where the agent
-genuinely has no tools, or point Codex at a `CODEX_HOME` that carries
-authentication and defines no MCP servers — at the cost of maintaining a second
-Codex home.
+This is stated so you can decide, not because it is fixed. Only one of the two
+paths closes it: Claude Code, where the agent genuinely has no tools.
+
+Pointing Codex at a `CODEX_HOME` that carries authentication and defines no MCP
+servers removes one outbound route, not the class. Codex's own hosted tools are
+not configured there and are not subject to the sandbox, so a second Codex home
+narrows the exposure at the cost of maintaining it — it does not end it. Treat
+any arrangement as partial until you have measured it the way described below.
 
 To check your own setup, run the extraction command by hand against a canary
 file outside the working directory and see whether it comes back. Phrase the
@@ -214,7 +219,7 @@ Removing the plugin stops all capture and injection but leaves stored memory in
 place. To discard that too:
 
 ```sh
-rm -rf ~/.local/share/amtr   # or ~/.amtr if ~/.local is absent
+rm -rf ~/.local/share/amtr   # or ~/.amtr, whichever it resolved to
 ```
 
 Uninstalling with a snapshot still undelivered is safe: nothing reads the

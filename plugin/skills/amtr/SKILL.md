@@ -50,6 +50,11 @@ rollout filename, which is the id AMTR keys rows by.
    directory the binary was installed into. It is appended, not prepended, so
    nothing here shadows a system tool.
 
+   If neither variable is set the command expands to an empty session id, and
+   `amtr` refuses it rather than moving the snapshot somewhere nothing will ask
+   for it. Report that to the user instead of retrying — the host did not tell
+   this session what it is called, and nothing you can type here fixes that.
+
 3. Adopt what the command prints as your own working memory for this session,
    and continue the user's work from it. It is a replacement, not a reference:
    treat it as what you already knew.

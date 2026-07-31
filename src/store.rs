@@ -4,7 +4,8 @@
 //! Hooks are spawned by the host with no guaranteed shell environment, so a
 //! tunable like XDG_DATA_HOME could resolve differently for the writer (a
 //! detached worker) and the reader (a hook), which would present as memory
-//! loss. The rule is a hardcoded two-way branch on the existence of `~/.local`.
+//! loss. The rule is hardcoded: an existing store wins, then the presence of
+//! `~/.local` decides.
 //!
 //! The home directory itself is unavoidably environmental: `home_dir()` reads
 //! `$HOME` and falls back to the passwd entry. Both halves resolve it the same
@@ -35,22 +36,38 @@ pub struct Row {
 /// home directory and sits outside it.
 const CORTEX: &str = "prefrontal-cortex";
 
-/// Resolved on-disk layout. Everything AMT owns lives under one base dir.
+/// Resolved on-disk layout. Everything amtr owns lives under one base dir.
 pub struct Store {
     base: PathBuf,
 }
 
 impl Store {
-    /// `~/.local/share/amtr` when `~/.local` exists, else
-    /// `~/.amtr`.
     pub fn base_dir() -> io::Result<PathBuf> {
         let home = std::env::home_dir()
             .ok_or_else(|| io::Error::other("cannot determine home directory"))?;
-        Ok(if home.join(".local").is_dir() {
+        Ok(Store::base_dir_under(&home))
+    }
+
+    /// An existing `~/.amtr` wins; otherwise `~/.local/share/amtr` when
+    /// `~/.local` exists, else `~/.amtr`.
+    ///
+    /// The fallback is checked first because this runs at every process start,
+    /// not once at install time. A machine whose `~/.local` did not exist at
+    /// the first synthesize keeps its rows in `~/.amtr` — and any unrelated
+    /// program creating `~/.local` afterwards would otherwise move the store
+    /// out from under them, silently, which is the failure this whole module
+    /// is arranged to avoid. Nothing moves a store once it exists.
+    ///
+    /// Takes the home directory rather than reading it, so the rule can be
+    /// exercised against a directory a test controls.
+    fn base_dir_under(home: &Path) -> PathBuf {
+        if home.join(".amtr").is_dir() {
+            home.join(".amtr")
+        } else if home.join(".local").is_dir() {
             home.join(".local/share/amtr")
         } else {
             home.join(".amtr")
-        })
+        }
     }
 
     pub fn open() -> io::Result<Store> {
@@ -416,10 +433,16 @@ mod tests {
     static SEQ: AtomicU32 = AtomicU32::new(0);
 
     fn scratch() -> Store {
+        Store::at(scratch_dir()).unwrap()
+    }
+
+    /// A fresh, empty directory. Not a store: some tests need somewhere to
+    /// build home directories that a store has never touched.
+    fn scratch_dir() -> PathBuf {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("amtr-test-{}-{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
-        Store::at(dir).unwrap()
+        dir
     }
 
     fn row(session: &str, key: Option<&str>, handoff: &str) -> Row {
@@ -616,6 +639,77 @@ mod tests {
         assert!(!escaped.contains('/'), "no separator survives: {escaped}");
         assert!(!escaped.starts_with('.'), "cannot climb out: {escaped}");
         assert_eq!(slug(".."), "_");
+    }
+
+    /// The same contract as the filename rule below, one level up: agreeing on
+    /// the filename is worth nothing if the two halves disagree about which
+    /// directory it sits in.
+    ///
+    /// Each case is a home directory in a different state, including the one
+    /// that motivates the rule — a store already in `~/.amtr` on a machine
+    /// where `~/.local` has since appeared.
+    #[test]
+    fn the_shell_reader_resolves_the_same_base_directory_as_the_writer() {
+        const HOOK: &str = include_str!("../plugin/tools/amtr-hook.sh");
+
+        let derivation = extract_base_dir_derivation(HOOK);
+        let root = scratch_dir();
+
+        // (existing dirs, what the rule must pick)
+        let cases: [(&[&str], &str); 5] = [
+            (&[], ".amtr"),
+            (&[".local"], ".local/share/amtr"),
+            (&[".amtr"], ".amtr"),
+            // The drift this rule exists to stop: rows are already in ~/.amtr
+            // and something unrelated created ~/.local afterwards.
+            (&[".amtr", ".local"], ".amtr"),
+            (&[".local", ".local/share/amtr"], ".local/share/amtr"),
+        ];
+
+        for (i, (existing, expected)) in cases.iter().enumerate() {
+            let home = root.join(format!("home{i}"));
+            for dir in *existing {
+                fs::create_dir_all(home.join(dir)).unwrap();
+            }
+            if existing.is_empty() {
+                fs::create_dir_all(&home).unwrap();
+            }
+
+            let program = format!("home=\"$1\"\n{derivation}\nprintf '%s' \"$amtr_home\"");
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&program)
+                .arg("sh")
+                .arg(&home)
+                .output()
+                .expect("sh is available");
+            let from_shell = String::from_utf8_lossy(&out.stdout).to_string();
+
+            assert_eq!(
+                Store::base_dir_under(&home).to_string_lossy(),
+                from_shell,
+                "writer and reader disagree for a home containing {existing:?}"
+            );
+            assert_eq!(
+                from_shell,
+                home.join(expected).to_string_lossy(),
+                "both agreed on the wrong directory for {existing:?}"
+            );
+        }
+    }
+
+    /// Lifts the base-directory branch out of the hook script.
+    ///
+    /// Panics rather than returning nothing, for the same reason the filename
+    /// extractor does: a test that quietly stopped exercising the real rule is
+    /// the blind spot it exists to remove.
+    fn extract_base_dir_derivation(script: &str) -> String {
+        let start = script
+            .find("if [ -d \"$home/.amtr\" ]; then")
+            .expect("the base-directory branch moved; point this extractor at its new shape");
+        let rest = &script[start..];
+        let end = rest.find("\nfi\n").expect("unterminated branch") + "\nfi".len();
+        rest[..end].to_string()
     }
 
     /// The reader is the hook script, in shell, so this rule exists twice. They

@@ -59,11 +59,17 @@ called wrong. The reader discharges a snapshot only on `0`.
 
 ## Home directory
 
-`~/.local/share/amtr/` if `~/.local` exists, otherwise `~/.amtr/`. No
-*configurable* environment variable takes part: hooks are spawned by the host
-with no guaranteed shell environment, and a tunable that resolved differently
-for the detached writer and the reading hook would present as memory loss.
-(`$HOME` itself is unavoidable, and both halves read it the same way.)
+An existing `~/.amtr/` wins. Failing that, `~/.local/share/amtr/` if `~/.local`
+exists, otherwise `~/.amtr/`. No *configurable* environment variable takes part:
+hooks are spawned by the host with no guaranteed shell environment, and a
+tunable that resolved differently for the detached writer and the reading hook
+would present as memory loss. (`$HOME` itself is unavoidable, and both halves
+read it the same way.)
+
+The existing store is checked first because this is resolved at every process
+start. A machine whose `~/.local` did not exist at the first run keeps its rows
+in `~/.amtr/`, and some unrelated program creating `~/.local` later must not
+move the store away from them.
 
 ```
 <home>/
@@ -104,6 +110,7 @@ Or take a prebuilt binary from a release, verifying it first:
 ```sh
 tar -xzf amtr-v0.1.0-aarch64-apple-darwin.tar.gz
 sha256sum -c SHA256SUMS        # shasum -a 256 -c on macOS
+mkdir -p ~/.local/bin          # install does not create it
 install -m 755 amtr ~/.local/bin/amtr
 ```
 
@@ -140,24 +147,32 @@ covered by `cargo test`, and the hook script's own behavior by
 machine that could be `/bin/sh`. What neither covers is the process level:
 forking and hook wiring cannot be asserted meaningfully. Check that by hand:
 
+Set these first, since the store's location depends on the machine and the
+angle brackets a placeholder would use are redirections to the shell:
+
+```sh
+AMTR_HOME=~/.local/share/amtr      # or ~/.amtr; see "Home directory"
+TRANSCRIPT=~/.claude/projects/PROJECT_DIR/SESSION_UUID.jsonl
+```
+
 **1. Detach really detaches.** With a real transcript path:
 
 ```sh
-time amtr synthesize test-detach ~/.claude/projects/<dir>/<uuid>.jsonl
-ls ~/.local/share/amtr/prefrontal-cortex/test-detach.marker   # exists immediately
-pgrep -fl 'amtr synthesize'                                   # worker still alive
+time amtr synthesize test-detach "$TRANSCRIPT"
+ls "$AMTR_HOME/prefrontal-cortex/test-detach.marker"   # exists immediately
+pgrep -fl 'amtr synthesize'                            # worker still alive
 ```
 
 The command must return in well under a second, the marker must already be on
 disk when it does, and the worker must appear as a child of `init` (PPID 1) in
-`ps -o ppid= -p <pid>`.
+`ps -o ppid= -p "$(pgrep -f 'amtr synthesize' | head -1)"`.
 
 **2. The snapshot waits to be collected.** Let the worker finish, then check
 that the debt is still recorded — this is the case that a self-clearing worker
 would silently drop:
 
 ```sh
-cat ~/.local/share/amtr/prefrontal-cortex/test-detach.marker   # -> ready:amtr-...
+cat "$AMTR_HOME/prefrontal-cortex/test-detach.marker"   # -> ready:amtr-...
 ```
 
 `test-detach.json` must exist alongside it, and both must still be there

@@ -41,9 +41,15 @@ case "$session_id" in
 *[!A-Za-z0-9._-]*) exit 0 ;;
 esac
 
-# Same two-way branch the binary uses, and for the same reason: a hook has no
-# guaranteed shell environment, so the layout must not depend on a tunable.
-if [ -d "$home/.local" ]; then
+# Same rule the binary uses, and for the same reason: a hook has no guaranteed
+# shell environment, so the layout must not depend on a tunable. An existing
+# `~/.amtr` wins, because this is evaluated at every start and a `~/.local` that
+# appears later must not move the store away from rows already written there. A
+# test in src/store.rs lifts these lines out and runs them against the binary's
+# rule, so editing one side alone fails `cargo test`.
+if [ -d "$home/.amtr" ]; then
+	amtr_home="$home/.amtr"
+elif [ -d "$home/.local" ]; then
 	amtr_home="$home/.local/share/amtr"
 else
 	amtr_home="$home/.amtr"
