@@ -8,6 +8,10 @@ Pre-1.0 releases may introduce breaking changes freely as the storage layout and
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-31
+
+> Replacement memory across a context boundary.
+
 ### Added — replacement memory across a context boundary
 
 `amtr synthesize` runs from a `PreCompact` hook: it records that a snapshot is
@@ -51,4 +55,5 @@ root-owned `/usr/sbin/amt` that wins on a default `PATH`.
 Stored memory is deliberately ephemeral. Every failure path writes nothing and
 exits zero, on the principle that the next compaction redoes the work.
 
-[Unreleased]: https://github.com/naoto256/amnestic-trace
+[Unreleased]: https://github.com/naoto256/amnestic-trace/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/naoto256/amnestic-trace/releases/tag/v0.1.0

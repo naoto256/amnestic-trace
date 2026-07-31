@@ -1,10 +1,13 @@
 [package]
 name = "amtr"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2021"
 description = "Ephemeral replacement memory across a context boundary."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/naoto256/amnestic-trace"
+# Distributed as a plugin and a built binary, never from crates.io. Stated so a
+# stray `cargo publish` fails instead of succeeding.
+publish = false
 
 # Named `amtr`, not `amt`: macOS ships a root-owned /usr/sbin/amt that wins on a
 # default PATH. Nothing types this by hand — the callers are hooks.
