@@ -74,11 +74,19 @@ pub fn slice(raw: &str, since: Option<&str>) -> Window {
     let mut text = entries.join("\n\n");
     if text.chars().count() > MAX_WINDOW_CHARS {
         // Keep the tail: the newest turns are the ones being replaced.
-        let cut = text.char_indices().nth(text.chars().count() - MAX_WINDOW_CHARS).map(|(i, _)| i).unwrap_or(0);
+        let cut = text
+            .char_indices()
+            .nth(text.chars().count() - MAX_WINDOW_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         text = format!("[... earlier entries dropped ...]\n{}", &text[cut..]);
     }
 
-    Window { host: host.unwrap_or(Host::Claude), text, last_ts }
+    Window {
+        host: host.unwrap_or(Host::Claude),
+        text,
+        last_ts,
+    }
 }
 
 /// Codex rollout lines wrap everything in `payload`; Claude Code transcript
@@ -94,7 +102,9 @@ fn detect(v: &Value) -> Option<Host> {
 }
 
 fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 /// Flattens one journal entry to `role: text`. Both hosts nest their prose in
@@ -128,7 +138,10 @@ fn harvest(v: &Value, out: &mut String) {
             for (k, val) in map {
                 match val {
                     Value::String(s)
-                        if matches!(k.as_str(), "text" | "content" | "command" | "description" | "reasoning") =>
+                        if matches!(
+                            k.as_str(),
+                            "text" | "content" | "command" | "description" | "reasoning"
+                        ) =>
                     {
                         if !s.trim().is_empty() {
                             if !out.is_empty() {
@@ -194,7 +207,10 @@ mod tests {
     #[test]
     fn window_starts_strictly_after_the_boundary() {
         let w = slice(CLAUDE, Some("2026-06-23T16:00:00.000Z"));
-        assert!(!w.text.contains("first"), "boundary entry must not be replayed");
+        assert!(
+            !w.text.contains("first"),
+            "boundary entry must not be replayed"
+        );
         assert!(w.text.contains("second"));
         assert_eq!(w.last_ts.as_deref(), Some("2026-06-23T16:05:00.000Z"));
     }

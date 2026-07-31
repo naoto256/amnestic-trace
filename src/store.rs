@@ -64,13 +64,17 @@ impl Store {
     }
 
     fn row_path(&self, session_id: &str) -> PathBuf {
-        self.base.join(CORTEX).join(format!("{}.json", slug(session_id)))
+        self.base
+            .join(CORTEX)
+            .join(format!("{}.json", slug(session_id)))
     }
 
     /// Lives beside the row rather than in a directory of its own: the marker
     /// is a property of the session, not a separate subsystem.
     pub fn marker_path(&self, session_id: &str) -> PathBuf {
-        self.base.join(CORTEX).join(format!("{}.marker", slug(session_id)))
+        self.base
+            .join(CORTEX)
+            .join(format!("{}.marker", slug(session_id)))
     }
 
     pub fn load(&self, session_id: &str) -> Option<Row> {
@@ -105,7 +109,10 @@ impl Store {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let row: Row = match fs::read_to_string(&path).ok().and_then(|r| serde_json::from_str(&r).ok()) {
+            let row: Row = match fs::read_to_string(&path)
+                .ok()
+                .and_then(|r| serde_json::from_str(&r).ok())
+            {
                 Some(r) => r,
                 None => continue,
             };
@@ -119,7 +126,10 @@ impl Store {
     /// MOVE: the row's session_id becomes the caller's and the giving session
     /// forgets, so its next synthesize is a first-compaction.
     pub fn take(&self, row: &Row, new_session_id: &str) -> io::Result<Row> {
-        let moved = Row { session_id: new_session_id.to_string(), ..row.clone() };
+        let moved = Row {
+            session_id: new_session_id.to_string(),
+            ..row.clone()
+        };
         self.save(&moved)?;
         if slug(&row.session_id) != slug(new_session_id) {
             self.forget(&row.session_id)?;
@@ -159,7 +169,9 @@ impl Store {
     /// nothing in the binary ever reads a marker back.
     #[cfg(test)]
     pub fn marker_state(&self, session_id: &str) -> Option<String> {
-        fs::read_to_string(self.marker_path(session_id)).ok().map(|s| s.trim().to_string())
+        fs::read_to_string(self.marker_path(session_id))
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     pub fn unmark(&self, session_id: &str) -> io::Result<()> {
@@ -193,7 +205,13 @@ fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
 pub fn slug(session_id: &str) -> String {
     let cleaned: String = session_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let cleaned = cleaned.trim_matches('.').to_string();
     if cleaned.is_empty() {
@@ -204,7 +222,9 @@ pub fn slug(session_id: &str) -> String {
 }
 
 pub fn now() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
 }
 
 /// Volatile name of one snapshot. Milliseconds in base36 keep it short enough
@@ -261,7 +281,10 @@ mod tests {
         let got = s.load("a").unwrap();
         assert_eq!(got.handoff, "second");
         assert_eq!(got.amtr_key.as_deref(), Some("amtr-2"));
-        assert!(s.find_by_key("amtr-1").is_none(), "superseded key must not resolve");
+        assert!(
+            s.find_by_key("amtr-1").is_none(),
+            "superseded key must not resolve"
+        );
     }
 
     #[test]
@@ -277,7 +300,10 @@ mod tests {
 
         assert_eq!(moved.session_id, "taker");
         assert_eq!(s.load("taker").unwrap().handoff, "state");
-        assert!(s.load("giver").is_none(), "giver's next synthesize must be a first-compaction");
+        assert!(
+            s.load("giver").is_none(),
+            "giver's next synthesize must be a first-compaction"
+        );
         assert_eq!(s.find_by_key("amtr-k").unwrap().session_id, "taker");
     }
 
@@ -293,12 +319,25 @@ mod tests {
     fn clone_copies_drops_the_key_and_leaves_the_source_intact() {
         let s = scratch();
         s.save(&row("giver", Some("amtr-k"), "state")).unwrap();
-        let copy = s.clone_to(&s.find_by_key("amtr-k").unwrap(), "taker", "2026-08-01T12:00:00.000Z").unwrap();
+        let copy = s
+            .clone_to(
+                &s.find_by_key("amtr-k").unwrap(),
+                "taker",
+                "2026-08-01T12:00:00.000Z",
+            )
+            .unwrap();
 
         assert_eq!(copy.handoff, "state");
-        assert_eq!(copy.amtr_key, None, "a clone must not seed further key-based chaining");
+        assert_eq!(
+            copy.amtr_key, None,
+            "a clone must not seed further key-based chaining"
+        );
         assert_eq!(copy.compacted_at, "2026-08-01T12:00:00.000Z");
-        assert_eq!(s.load("giver").unwrap().handoff, "state", "clone is not a move");
+        assert_eq!(
+            s.load("giver").unwrap().handoff,
+            "state",
+            "clone is not a move"
+        );
         assert_eq!(s.find_by_key("amtr-k").unwrap().session_id, "giver");
     }
 
@@ -333,7 +372,11 @@ mod tests {
         let s = scratch();
         s.mark_ongoing("a").unwrap();
         s.mark_ready("a").unwrap();
-        assert_eq!(s.marker_state("a").as_deref(), Some("ready"), "debt must outlive the worker");
+        assert_eq!(
+            s.marker_state("a").as_deref(),
+            Some("ready"),
+            "debt must outlive the worker"
+        );
     }
 
     #[test]
@@ -341,7 +384,11 @@ mod tests {
         let s = scratch();
         s.mark_ongoing("a").unwrap();
         s.unmark("a").unwrap(); // what synthesize does when work() errors
-        assert_eq!(s.marker_state("a"), None, "nothing to deliver, so nothing owed");
+        assert_eq!(
+            s.marker_state("a"),
+            None,
+            "nothing to deliver, so nothing owed"
+        );
     }
 
     #[test]
@@ -350,7 +397,11 @@ mod tests {
         s.mark_ongoing("a").unwrap();
         s.unmark("a").unwrap(); // reader timed out and failed open
         s.mark_ready("a").unwrap(); // worker lands afterwards
-        assert_eq!(s.marker_state("a").as_deref(), Some("ready"), "next turn delivers it");
+        assert_eq!(
+            s.marker_state("a").as_deref(),
+            Some("ready"),
+            "next turn delivers it"
+        );
     }
 
     #[test]

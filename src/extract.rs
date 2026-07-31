@@ -20,8 +20,14 @@ pub fn compose(prompt: &str, prior: Option<&str>, window: &str) -> String {
         "{prompt}\n\n\
          ## Prior handoff\n\n{}\n\n\
          ## Session journal since the previous compaction\n\n{}\n",
-        prior.filter(|p| !p.trim().is_empty()).unwrap_or("(none - this is the first compaction of this session)"),
-        if window.trim().is_empty() { "(empty)" } else { window },
+        prior
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or("(none - this is the first compaction of this session)"),
+        if window.trim().is_empty() {
+            "(empty)"
+        } else {
+            window
+        },
     )
 }
 
@@ -45,10 +51,17 @@ pub fn run(host: Host, input: &str) -> io::Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?.write_all(input.as_bytes())?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("no stdin"))?
+        .write_all(input.as_bytes())?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
-        return Err(io::Error::other(format!("extraction agent exited with {}", out.status)));
+        return Err(io::Error::other(format!(
+            "extraction agent exited with {}",
+            out.status
+        )));
     }
     validate(&strip_preamble(&String::from_utf8_lossy(&out.stdout)))
 }
@@ -84,7 +97,9 @@ pub fn validate(raw: &str) -> io::Result<String> {
         return Err(io::Error::other("extraction produced no usable handoff"));
     }
     if text.len() > MAX_HANDOFF_BYTES {
-        return Err(io::Error::other("extraction output exceeds the handoff budget"));
+        return Err(io::Error::other(
+            "extraction output exceeds the handoff budget",
+        ));
     }
     Ok(text.to_string())
 }
@@ -139,7 +154,10 @@ mod tests {
         let raw = "## Rules and rulings\n- \"never use the Foo library\"\n\n\
                    ## Task map and position\nfixing the parser\n";
         let out = strip_preamble(raw);
-        assert!(out.contains("never use the Foo library"), "lost the rules: {out}");
+        assert!(
+            out.contains("never use the Foo library"),
+            "lost the rules: {out}"
+        );
         assert!(out.contains("## Task map and position"));
         assert_eq!(out, raw);
     }

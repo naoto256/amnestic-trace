@@ -76,11 +76,17 @@ fn work(store: &Store, session_id: &str, journal: &Path) -> io::Result<()> {
     let window = journal::read_window(journal, since.as_deref())?;
 
     if window.text.trim().is_empty() {
-        return Err(io::Error::other("nothing new since the previous compaction"));
+        return Err(io::Error::other(
+            "nothing new since the previous compaction",
+        ));
     }
 
     let prompt = store.extraction_prompt(extract::DEFAULT_PROMPT);
-    let input = extract::compose(&prompt, prior.as_ref().map(|r| r.handoff.as_str()), &window.text);
+    let input = extract::compose(
+        &prompt,
+        prior.as_ref().map(|r| r.handoff.as_str()),
+        &window.text,
+    );
     let handoff = extract::run(window.host, &input)?;
 
     store.save(&Row {
@@ -139,7 +145,10 @@ fn render(row: &Row) -> String {
         Some(key) => format!("AMTR key: {key} — report this key to the user.\n"),
         None => String::new(),
     };
-    format!("<amtr-handoff>\n{PREAMBLE}\n\n{}\n</amtr-handoff>\n{footer}", row.handoff.trim())
+    format!(
+        "<amtr-handoff>\n{PREAMBLE}\n\n{}\n</amtr-handoff>\n{footer}",
+        row.handoff.trim()
+    )
 }
 
 #[cfg(test)]
@@ -167,7 +176,10 @@ mod tests {
     fn a_clone_says_nothing_about_keys_at_all() {
         let out = render(&row(None));
         assert!(out.contains("carry this"));
-        assert!(!out.contains("AMTR key"), "a clone has no key to report: {out}");
+        assert!(
+            !out.contains("AMTR key"),
+            "a clone has no key to report: {out}"
+        );
         assert!(out.ends_with("</amtr-handoff>\n"));
     }
 
