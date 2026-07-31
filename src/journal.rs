@@ -159,10 +159,16 @@ fn render(v: &Value) -> Option<String> {
 /// journal, the session that read it was already exposed, and filtering here
 /// does nothing about that. What this tool adds is reach — a handoff carries
 /// forward across compactions, and is read by an agent with none of the
-/// conversation's context. Those are addressed on the way out instead: the
-/// extraction agent holds no tools, and everything tag-shaped is escaped before
-/// injection. The prompt warns about quoted instructions in general terms,
-/// without depending on any mark being present.
+/// conversation's context. That is addressed on the way out instead.
+///
+/// How far the outbound defence goes is not the same on both hosts, and this
+/// note is the place a later reader is most likely to conclude the boundary is
+/// covered, so it is worth being exact: on Claude Code the extraction agent
+/// holds no tools at all; on Codex it keeps a shell that cannot write and
+/// cannot reach the network, but can read what the user can read. See
+/// `extract::run`. What *is* unconditional is that everything tag-shaped is
+/// escaped before injection, and that the prompt warns about quoted
+/// instructions in general terms, depending on no mark being present.
 fn harvest(v: &Value, out: &mut String) {
     match v {
         Value::Object(map) => {

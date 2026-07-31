@@ -15,41 +15,36 @@ pub const DEFAULT_PROMPT: &str = include_str!("default-prompt.md");
 
 /// Why a synthesize produced no new snapshot.
 ///
-/// These were one type for a long time, and flattening them cost real
-/// correctness: the caller could not tell "there was nothing to do" from "the
-/// agent is broken", so it treated both as a failure and discarded a perfectly
-/// good undelivered snapshot from the *previous* compaction. What the caller
-/// does with the marker depends entirely on which of these happened.
+/// Two variants, because two is how many the caller distinguishes. There were
+/// four — transient, permanent, rejected, plus "nothing to do" — and the
+/// difference between the first three was never acted on: they fed a single
+/// catch-all arm that treated them identically. Four names for one behavior is
+/// a claim that retry policy exists, and reading them invited the belief that
+/// something downstream was reasoning about recoverability. Nothing was.
+///
+/// What survives is the one distinction that changes anything: whether this was
+/// a failure at all. Everything else belongs in the message, which is what the
+/// log actually prints.
 #[derive(Debug)]
 pub enum Failed {
     /// Nothing new in the journal. Not a failure — there was no work.
     Vacuous,
-    /// Could not run to completion this time; the same window may well work at
-    /// the next attempt.
-    Transient(String),
-    /// The agent ran and failed. Retrying this window will fail the same way.
-    Permanent(String),
-    /// The agent produced something, and it is not fit to become memory.
-    Rejected(String),
+    /// Something went wrong. The message says what; nothing branches on it.
+    Failed(String),
 }
 
 impl std::fmt::Display for Failed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failed::Vacuous => write!(f, "nothing new since the previous compaction"),
-            Failed::Transient(m) => write!(f, "temporarily could not extract: {m}"),
-            Failed::Permanent(m) => write!(f, "extraction failed: {m}"),
-            Failed::Rejected(m) => write!(f, "extraction output rejected: {m}"),
+            Failed::Failed(m) => write!(f, "no snapshot written: {m}"),
         }
     }
 }
 
 impl From<io::Error> for Failed {
-    /// An unclassified I/O error is treated as transient. Being wrong that way
-    /// leaves a marker to retry against; being wrong the other way throws a
-    /// snapshot away.
     fn from(e: io::Error) -> Self {
-        Failed::Transient(e.to_string())
+        Failed::Failed(e.to_string())
     }
 }
 
@@ -145,7 +140,7 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
         .spawn()
         // Not installed, not on PATH, not executable: nothing about this window
         // is wrong, so the marker should survive for a later attempt.
-        .map_err(|e| Failed::Transient(format!("could not start the extraction agent: {e}")))?;
+        .map_err(|e| Failed::Failed(format!("could not start the extraction agent: {e}")))?;
 
     // Both pipes are serviced off-thread. The input is larger than a pipe
     // buffer and the output can be too, so writing and reading inline would
@@ -174,7 +169,7 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(Failed::Transient("extraction agent timed out".into()));
+            return Err(Failed::Failed("extraction agent timed out".into()));
         }
         std::thread::sleep(Duration::from_millis(200));
     };
@@ -184,17 +179,17 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
     let _ = writer.join();
     let stdout = reader
         .join()
-        .map_err(|_| Failed::Transient("output reader panicked".into()))?
-        .map_err(|e| Failed::Transient(format!("could not read the agent's output: {e}")))?;
+        .map_err(|_| Failed::Failed("output reader panicked".into()))?
+        .map_err(|e| Failed::Failed(format!("could not read the agent's output: {e}")))?;
 
     if !status.success() {
         // The agent ran and decided it could not do this. Feeding it the same
         // window again will reach the same place.
-        return Err(Failed::Permanent(format!(
+        return Err(Failed::Failed(format!(
             "extraction agent exited with {status}"
         )));
     }
-    validate(&strip_preamble(&String::from_utf8_lossy(&stdout))).map_err(Failed::Rejected)
+    validate(&strip_preamble(&String::from_utf8_lossy(&stdout))).map_err(Failed::Failed)
 }
 
 /// Drops anything before the first `##` heading.

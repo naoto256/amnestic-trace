@@ -53,6 +53,25 @@ else
 	amtr_home="$home/.amtr"
 fi
 
+# The binary creates this directory, but the redirect below is opened by the
+# shell *before* the binary runs. On a fresh install the directory does not
+# exist yet, the redirect fails, and a POSIX shell then skips the entire command
+# — so the binary never ran, nothing was created, and the next turn found no
+# marker to bootstrap from. The plugin was inert from installation onward, and
+# silently: the only complaint went to the hook's own stderr, which is the thing
+# the redirect existed to capture.
+#
+# The umask is set in a subshell so both the directory and the log start
+# owner-only. Without it the shell creates them at the ambient umask and the
+# binary's own 0600/0700 intent is defeated by whichever of the two got there
+# first — a store holding session transcripts should not be world-readable for
+# even the moment in between.
+(
+	umask 077
+	mkdir -p "$amtr_home" 2>/dev/null
+	[ -e "$amtr_home/amtr.log" ] || : >>"$amtr_home/amtr.log" 2>/dev/null
+) 2>/dev/null
+
 # Must match `slug()` in src/store.rs exactly, or the reader looks for a marker
 # at a path the writer never wrote. All three of the binary's steps are here:
 # replace anything outside the allowed class, trim leading and trailing dots,
@@ -66,7 +85,12 @@ fi
 # A test in src/store.rs lifts these two lines out of this file and runs them
 # against the binary's rule, so changing them here without changing there fails
 # `cargo test`.
-slug=$(printf '%s' "$session_id" | sed 's/[^A-Za-z0-9._-]/_/g; s/^\.*//; s/\.*$//')
+#
+# LC_ALL=C pins sed to bytes. Under a UTF-8 locale some seds treat a multibyte
+# character as one unit and others as its bytes, and the binary substitutes per
+# byte — so without this the two agree or disagree depending on the environment
+# the host happened to hand the hook.
+slug=$(printf '%s' "$session_id" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/_/g; s/^\.*//; s/\.*$//')
 [ -n "$slug" ] || slug=_
 marker="$amtr_home/prefrontal-cortex/$slug.marker"
 
@@ -117,24 +141,36 @@ recall)
 		waited=$((waited + 1))
 	done
 
-	if [ "$(cat "$marker" 2>/dev/null)" != "ready" ]; then
+	# The marker names the snapshot it owes: `ready:<amtr_key>`. Captured whole,
+	# so the debt discharged at the end is provably the one delivered here.
+	claim=$(cat "$marker" 2>/dev/null)
+	case "$claim" in
+	ready:*) ;;
+	*)
 		# Fail open: still extracting, or the worker gave up. The transcript
 		# survives, so the damage is that this compaction falls back to the
 		# host's native summary. Dropping the marker here is safe — a worker
-		# that lands late rewrites it to `ready` and the next turn delivers.
+		# that lands late rewrites it and the next turn delivers.
 		rm -f "$marker"
 		exit 0
-	fi
+		;;
+	esac
 
 	# Deliver first, then discharge the debt, so a snapshot is never marked
 	# delivered on a turn that failed to inject it. `amtr recall` exits 0 only
 	# when it actually printed a handoff — 1 means there was nothing to deliver
 	# or it failed, and either way the debt stands.
-	if amtr recall "$session_id" 2>/dev/null; then
-		# Re-read before discharging. A compaction can start while this turn is
-		# in flight, and that worker's fresh `ongoing` must not be deleted as
-		# though it were the snapshot just delivered.
-		if [ "$(cat "$marker" 2>/dev/null)" = "ready" ]; then
+	#
+	# stderr goes to the log, not /dev/null. A row that cannot be parsed fails
+	# here on every single turn, and discarding the reason made that invisible:
+	# the marker stayed, the turn injected nothing, and nothing anywhere said
+	# why.
+	if amtr recall "$session_id" 2>>"$amtr_home/amtr.log"; then
+		# Compare the whole claim, not just its shape. A compaction can finish
+		# while this turn is in flight, and its `ready:<newer key>` must not be
+		# discharged by the turn that delivered the older one — which a check
+		# for "still ready" cannot tell apart.
+		if [ "$(cat "$marker" 2>/dev/null)" = "$claim" ]; then
 			rm -f "$marker"
 		fi
 	fi

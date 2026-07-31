@@ -156,9 +156,11 @@ source takes effect on the next session; editing the cache does nothing. A
 Git-backed marketplace behaves the other way around and needs
 `codex plugin marketplace upgrade naoto256-amtr` to pick up changes.
 
-`codex exec` emits `SessionStart` but not `UserPromptSubmit`, so the delivery
-hook does not run non-interactively. Capture and delivery are both interactive-
-session behavior.
+`codex exec` does fire the delivery hook — it emits `UserPromptSubmit` like an
+interactive session. It simply has nothing to deliver: a non-interactive run is
+its own session with its own id, so the hook finds no marker for it and exits
+without injecting. The same is true of the extraction subprocess this tool
+launches, which is why that does not feed itself its own memory.
 
 ## Uninstall
 

@@ -188,28 +188,38 @@ impl Store {
     }
 
     /// The marker is an undelivered debt, not a "compaction happened" flag.
-    /// `ongoing` means extraction is in flight; `ready` means a row is waiting
-    /// to be injected. The reader deletes it once delivery succeeds, so a
-    /// snapshot that lands while nobody is looking is still delivered at the
-    /// next turn rather than lost.
-    /// Both transitions go through the same atomic write, so a reader polling
-    /// this path never observes a half-written state word: it either keeps
-    /// waiting or delivers, never both.
-    pub fn mark_ongoing(&self, session_id: &str) -> io::Result<()> {
-        write_atomic(&self.marker_path(session_id), b"ongoing")
+    ///
+    /// `ongoing` means extraction is in flight. `ready:<amtr_key>` means a
+    /// specific snapshot is waiting to be injected — the key is part of the
+    /// state, not decoration. Without it, two things that must be told apart
+    /// look identical: the debt this run created, and a debt an earlier
+    /// compaction left undelivered. Every write goes through the same atomic
+    /// path, so a reader polling here sees one state word or another, never a
+    /// half-written one.
+    pub fn mark_ongoing(&self, session_id: &str) -> io::Result<Option<String>> {
+        // The previous state is handed back so the caller can put it right if
+        // this synthesize fails. Overwriting is correct when it succeeds — the
+        // new snapshot supersedes the old — but on failure the old row is still
+        // on disk, and destroying its marker orphans it forever.
+        let prior = fs::read_to_string(self.marker_path(session_id)).ok();
+        write_atomic(&self.marker_path(session_id), b"ongoing")?;
+        Ok(prior)
     }
 
-    pub fn mark_ready(&self, session_id: &str) -> io::Result<()> {
-        write_atomic(&self.marker_path(session_id), b"ready")
+    pub fn mark_ready(&self, session_id: &str, amtr_key: &str) -> io::Result<()> {
+        write_atomic(
+            &self.marker_path(session_id),
+            format!("ready:{amtr_key}").as_bytes(),
+        )
     }
 
     /// A row written but never marked deliverable is unreachable: the reader
     /// only looks when a marker says to. Worth a few attempts before giving up,
     /// since the usual cause is transient.
-    pub fn mark_ready_retrying(&self, session_id: &str) -> io::Result<()> {
+    pub fn mark_ready_retrying(&self, session_id: &str, amtr_key: &str) -> io::Result<()> {
         let mut last = None;
         for attempt in 0..3 {
-            match self.mark_ready(session_id) {
+            match self.mark_ready(session_id, amtr_key) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     last = Some(e);
@@ -220,20 +230,17 @@ impl Store {
         Err(last.unwrap_or_else(|| io::Error::other("could not mark deliverable")))
     }
 
-    /// Removes the marker only while it still says `ongoing`.
+    /// Puts back whatever the marker said before this synthesize claimed it.
     ///
-    /// A failed synthesize used to delete whatever marker it found. When the
-    /// failure was "nothing new in this window", that deleted the *previous*
-    /// compaction's `ready` — the row stayed on disk and no reader ever came
-    /// back for it, so a working handoff was lost to a later compaction that
-    /// did nothing at all. This withdraws only the claim this run staked.
-    pub fn withdraw_own_claim(&self, session_id: &str) -> io::Result<()> {
-        let path = self.marker_path(session_id);
-        match fs::read_to_string(&path) {
-            Ok(state) if state.trim() == "ongoing" => self.unmark(session_id),
-            // `ready` belongs to someone else's snapshot; absent is already the
-            // desired state.
-            _ => Ok(()),
+    /// The guard this replaces read the marker and removed it if it said
+    /// `ongoing` — but `mark_ongoing` had already written exactly that, so the
+    /// guard was reading its own handwriting and deleting an earlier
+    /// compaction's undelivered `ready` regardless. The state to restore has to
+    /// be captured before the overwrite; it cannot be inferred afterwards.
+    pub fn restore_marker(&self, session_id: &str, prior: Option<&str>) -> io::Result<()> {
+        match prior {
+            Some(state) => write_atomic(&self.marker_path(session_id), state.as_bytes()),
+            None => self.unmark(session_id),
         }
     }
 
@@ -346,12 +353,19 @@ fn restrict_dir(_path: &Path) {}
 
 /// Session ids are host-minted UUIDs in practice; this only guards against a
 /// hostile or exotic id escaping the sessions directory.
+///
+/// Substitution is per **byte**, not per character. The reader is `sed`, which
+/// counts bytes, so counting characters here made the two disagree on anything
+/// multibyte: `ünïcode` became `_n_code` for the writer and `__n__code` for the
+/// reader, and the reader would look for a marker at a name the writer never
+/// wrote. Bytes are the representation both sides can agree on without either
+/// of them knowing about encodings.
 pub fn slug(session_id: &str) -> String {
     let cleaned: String = session_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-') {
+                b as char
             } else {
                 '_'
             }
@@ -531,9 +545,10 @@ mod tests {
         s.mark_ongoing("a").unwrap();
         assert_eq!(s.marker_state("a").as_deref(), Some("ongoing"));
 
-        // The worker finishes; the debt becomes deliverable but stays owed.
-        s.mark_ready("a").unwrap();
-        assert_eq!(s.marker_state("a").as_deref(), Some("ready"));
+        // The worker finishes; the debt becomes deliverable but stays owed, and
+        // names which snapshot it owes.
+        s.mark_ready("a", "amtr-k1").unwrap();
+        assert_eq!(s.marker_state("a").as_deref(), Some("ready:amtr-k1"));
 
         // Only the reader, having injected, discharges it.
         s.unmark("a").unwrap();
@@ -546,52 +561,45 @@ mod tests {
         // The marker must still be there, or the snapshot is never injected.
         let s = scratch();
         s.mark_ongoing("a").unwrap();
-        s.mark_ready("a").unwrap();
+        s.mark_ready("a", "amtr-k1").unwrap();
         assert_eq!(
             s.marker_state("a").as_deref(),
-            Some("ready"),
+            Some("ready:amtr-k1"),
             "debt must outlive the worker"
         );
     }
 
     #[test]
-    fn a_failed_extraction_leaves_no_debt() {
-        let s = scratch();
-        s.mark_ongoing("a").unwrap();
-        s.unmark("a").unwrap(); // what synthesize does when work() errors
-        assert_eq!(
-            s.marker_state("a"),
-            None,
-            "nothing to deliver, so nothing owed"
-        );
-    }
-
-    #[test]
     fn a_failed_synthesize_does_not_discard_an_older_undelivered_snapshot() {
-        // The case that made this necessary: a compaction with nothing new in
-        // it used to delete the previous compaction's `ready`. The row stayed
-        // on disk and no reader ever came back for it, so a perfectly good
-        // handoff was destroyed by a compaction that did no work at all.
+        // Goes through `mark_ongoing`, which is the whole point. The previous
+        // version of this test called the withdraw path directly and passed
+        // while the real sequence destroyed the older debt: `mark_ongoing` had
+        // already overwritten `ready` with `ongoing`, so the guard that only
+        // removed `ongoing` was reading its own handwriting.
         let s = scratch();
-        s.save(&row("a", Some("amtr-k"), "earlier snapshot"))
+        s.save(&row("a", Some("amtr-old"), "earlier snapshot"))
             .unwrap();
-        s.mark_ready("a").unwrap();
+        s.mark_ready("a", "amtr-old").unwrap();
 
-        s.withdraw_own_claim("a").unwrap();
+        // A later compaction claims the marker, then fails.
+        let prior = s.mark_ongoing("a").unwrap();
+        assert_eq!(prior.as_deref(), Some("ready:amtr-old"));
+        s.restore_marker("a", prior.as_deref()).unwrap();
 
         assert_eq!(
             s.marker_state("a").as_deref(),
-            Some("ready"),
-            "an undelivered snapshot is not this run's to withdraw"
+            Some("ready:amtr-old"),
+            "an earlier compaction's undelivered snapshot must survive"
         );
         assert_eq!(s.load("a").unwrap().unwrap().handoff, "earlier snapshot");
     }
 
     #[test]
-    fn a_failed_synthesize_does_withdraw_its_own_claim() {
+    fn a_failed_synthesize_withdraws_its_own_claim_when_nothing_was_owed() {
         let s = scratch();
-        s.mark_ongoing("a").unwrap();
-        s.withdraw_own_claim("a").unwrap();
+        let prior = s.mark_ongoing("a").unwrap();
+        assert_eq!(prior, None, "nothing was owed before this run");
+        s.restore_marker("a", prior.as_deref()).unwrap();
         assert_eq!(
             s.marker_state("a"),
             None,
@@ -628,10 +636,10 @@ mod tests {
         let s = scratch();
         s.mark_ongoing("a").unwrap();
         s.unmark("a").unwrap(); // reader timed out and failed open
-        s.mark_ready("a").unwrap(); // worker lands afterwards
+        s.mark_ready("a", "amtr-k1").unwrap(); // worker lands afterwards
         assert_eq!(
             s.marker_state("a").as_deref(),
-            Some("ready"),
+            Some("ready:amtr-k1"),
             "next turn delivers it"
         );
     }
@@ -691,6 +699,15 @@ mod tests {
             "a;rm -rf /",
             "//",
             "$(whoami)",
+            // Multibyte. The list above was entirely ASCII, which meant this
+            // test asserted agreement over exactly the inputs where the two
+            // implementations could not disagree — while its own comment
+            // claimed it established the rules match regardless of the gate.
+            // Rust counted characters and sed counted bytes.
+            "ünïcode",
+            "セッション",
+            "e\u{0301}combining",
+            "emoji\u{1F600}id",
         ];
 
         for id in ids {
