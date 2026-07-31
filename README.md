@@ -26,12 +26,14 @@ The binary is `amtr`, not `amt`, because macOS ships an unrelated root-owned
 `synthesize` writes a marker, detaches by double fork, and returns, so
 extraction runs in parallel with compaction itself.
 
-The marker is an **undelivered snapshot**, not a "compaction happened" flag:
+The marker is an **undelivered snapshot**, not a "compaction happened" flag. It
+names the snapshot it owes, so one debt can be told from another:
 
 ```
-ongoing  synthesize started       -> reader polls
-ready    row written              -> reader injects, then deletes the marker
-gone     delivered, or extraction failed, or the reader timed out
+ongoing            synthesize started -> reader polls
+ready:<amtr_key>   row written        -> reader injects, then deletes the marker
+gone               delivered, or this attempt failed with nothing owed before it
+ready:<older key>  this attempt failed and an older debt was owed -> see below
 ```
 
 The distinction matters because extraction usually finishes long before the
@@ -40,6 +42,19 @@ the next turn with nothing to deliver against, so the snapshot would never be
 injected — the marker has to outlive the worker and be discharged by whoever
 consumes it. A worker that lands after a timed-out reader gave up rewrites
 `ready`, and the turn after that delivers it.
+
+A failing synthesize does **not** always end at `gone`. Starting one overwrites
+the marker with `ongoing`, so if a previous compaction's snapshot was still
+undelivered, that claim would be destroyed by a later attempt that achieved
+nothing. Instead each attempt remembers what the marker said before it claimed
+it, and on any failure puts that back: `gone` when nothing was owed,
+`ready:<older key>` when something was. The older snapshot is then delivered on
+the next turn, as it should have been. This is the case the whole two-state
+marker exists for — a compaction that finds nothing new must not cost you the
+memory from the one before it.
+
+Because the key is part of the marker, a reader discharges only the exact debt
+it delivered. A snapshot that lands mid-turn is a different claim and survives.
 
 Every failure writes nothing to stdout, so the host injects nothing and the turn
 proceeds. The next compaction redoes the work.
@@ -62,7 +77,7 @@ for the detached writer and the reading hook would present as memory loss.
   amtr.log                         # detached worker's stderr, truncated at 256K
   prefrontal-cortex/
     <session_id>.json              # amtr_key, handoff, compaction time
-    <session_id>.marker            # ongoing | ready
+    <session_id>.marker            # ongoing | ready:<amtr_key>
 ```
 
 The tree is created `0700` and every file in it `0600`. It holds a distillation
@@ -137,17 +152,17 @@ that the debt is still recorded — this is the case that a self-clearing worker
 would silently drop:
 
 ```sh
-cat ~/.local/share/amtr/prefrontal-cortex/test-detach.marker   # -> ready
+cat ~/.local/share/amtr/prefrontal-cortex/test-detach.marker   # -> ready:amtr-...
 ```
 
 `test-detach.json` must exist alongside it, and both must still be there
 minutes later.
 
 **3. Hook injection.** In a real session, force a compaction (`/compact`), wait
-until the marker reads `ready`, then send a prompt — deliberately after a pause,
-since that is the ordinary case. The handoff should appear in context, the
-assistant should report the AMTR key, and the marker should be gone afterwards.
-Run Claude Code with `--debug hooks` to see the hook fire.
+until the marker reads `ready:<key>`, then send a prompt — deliberately after a
+pause, since that is the ordinary case. The handoff should appear in context,
+the assistant should report the AMTR key, and the marker should be gone
+afterwards. Run Claude Code with `--debug hooks` to see the hook fire.
 
 **4. Fail-open on timeout.** Write `ongoing` to a marker by hand for a live
 session and send a prompt. The turn must proceed normally after ~25s with

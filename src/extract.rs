@@ -93,6 +93,13 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 ///   successfully steered by journal content can still read files the user can
 ///   read. `workdir` limits where it starts, not where it can reach.
 ///
+///   Outbound network is closed under these flags, which matters because it is
+///   the difference between reading something and sending it somewhere.
+///   Measured, not inferred from the flag's name: an HTTPS request to a
+///   hostname fails at name resolution — `curl` exits 6 with no status. That is
+///   what was tested; a raw-address route was not, so treat this as "name
+///   resolution does not work" rather than a proof that nothing can leave.
+///
 /// `workdir` is an empty scratch directory in both cases, so nothing of this
 /// tool's own — other sessions' handoffs, their keys, the prompt — is sitting
 /// in reach of whatever does run.

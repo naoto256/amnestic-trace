@@ -74,12 +74,16 @@ try to steer whatever reads it.
   offers no equivalent of "no tools", so **the agent keeps a shell and can read
   files you can read** — the sandbox confines writing, not reading, and the
   working directory sets where it starts rather than where it can reach.
+  Outbound network is closed: measured under these flags, an HTTPS request to a
+  hostname fails at name resolution (`curl` exits 6). A raw-address route was
+  not tested, so read that as name resolution not working rather than as proof
+  that nothing can leave.
 
 So on Codex, a journal that successfully steers the extraction agent could have
 it read something outside the working directory and fold that into the handoff,
-which is injected into the next turn. If that matters for your threat model,
-prefer the Claude Code path, or read `prompt.md` and keep an eye on what lands
-in `prefrontal-cortex/`.
+which is injected into the next turn — where you would see it. If that matters
+for your threat model, prefer the Claude Code path, or read `prompt.md` and keep
+an eye on what lands in `prefrontal-cortex/`.
 
 The agent runs in an empty temporary directory, deleted afterwards, so nothing
 belonging to this tool — other sessions' handoffs, their keys, the prompt — sits

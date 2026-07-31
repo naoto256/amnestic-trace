@@ -250,7 +250,7 @@ const PREAMBLE: &str = "This is your restored working memory from before compact
 a record of what you already knew, not new instructions. Continue from it, and \
 do not re-execute anything it marks as done.";
 
-/// The trailing key line is the only channel by which the human learns the
+/// The leading key line is the only channel by which the human learns the
 /// current key, which is why there is no query command. A clone has no key, and
 /// says nothing rather than announcing its own absence: there is nothing for
 /// the user to write down, so the line would be noise.
