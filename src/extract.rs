@@ -2,8 +2,10 @@
 //! the result is usable. Anything short of a clean answer is an error, and
 //! every caller of this module treats an error as "write nothing".
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::journal::Host;
 
@@ -31,39 +33,107 @@ pub fn compose(prompt: &str, prior: Option<&str>, window: &str) -> String {
     )
 }
 
+/// An extraction that has not finished by now is wedged, not slow. Bounded so
+/// the marker cannot stay `ongoing` forever and block every later delivery.
+const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Launches the CLI that produced this journal, since that is the one known to
 /// be installed and authenticated in this environment.
-pub fn run(host: Host, input: &str) -> io::Result<String> {
+///
+/// The agent is given no tools. Summarizing a transcript needs none, and the
+/// journal it summarizes is full of text written by whatever the session was
+/// working on — an extraction agent that could run commands would turn that
+/// text into an execution path.
+///
+/// `workdir` is the store's own directory rather than the project the session
+/// was working in, so a tool that did somehow run would not start out pointed
+/// at the user's source tree.
+pub fn run(host: Host, input: &str, workdir: &Path) -> io::Result<String> {
     let mut cmd = match host {
         Host::Claude => {
             let mut c = Command::new("claude");
-            c.args(["-p", "--output-format", "text"]);
+            c.args([
+                "-p",
+                "--output-format",
+                "text",
+                // Empty allowlist: no tool is permitted.
+                "--allowed-tools",
+                "",
+                // Ignore every configured MCP server. None is passed, so this
+                // leaves the agent with none.
+                "--strict-mcp-config",
+            ]);
             c
         }
         Host::Codex => {
             let mut c = Command::new("codex");
-            c.args(["exec", "--skip-git-repo-check", "-"]);
+            c.args([
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "-C",
+            ]);
+            c.arg(workdir);
+            c.arg("-");
             c
         }
     };
+
     let mut child = cmd
+        .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // Inherited so the agent's own diagnostics land in the worker's log
+        // rather than vanishing.
+        .stderr(Stdio::inherit())
         .spawn()?;
-    child
+
+    // Both pipes are serviced off-thread. The input is larger than a pipe
+    // buffer and the output can be too, so writing and reading inline would
+    // deadlock against a child doing the opposite.
+    let mut sink = child
         .stdin
         .take()
-        .ok_or_else(|| io::Error::other("no stdin"))?
-        .write_all(input.as_bytes())?;
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
+        .ok_or_else(|| io::Error::other("no stdin"))?;
+    let payload = input.to_string();
+    let writer = std::thread::spawn(move || sink.write_all(payload.as_bytes()));
+
+    let mut source = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("no stdout"))?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        source.read_to_end(&mut buf).map(|_| buf)
+    });
+
+    let deadline = Instant::now() + EXTRACTION_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other("extraction agent timed out"));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    // The writer's error is deliberately ignored: a child that exits early
+    // leaves a broken pipe here, and its exit status is the better diagnostic.
+    let _ = writer.join();
+    let stdout = reader
+        .join()
+        .map_err(|_| io::Error::other("output reader panicked"))??;
+
+    if !status.success() {
         return Err(io::Error::other(format!(
-            "extraction agent exited with {}",
-            out.status
+            "extraction agent exited with {status}"
         )));
     }
-    validate(&strip_preamble(&String::from_utf8_lossy(&out.stdout)))
+    validate(&strip_preamble(&String::from_utf8_lossy(&stdout)))
 }
 
 /// Drops anything before the first `##` heading.
