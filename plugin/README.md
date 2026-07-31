@@ -71,16 +71,27 @@ try to steer whatever reads it.
   config supplied leaves no MCP servers. Verified by running it: the model can
   describe a command it would like to run, and cannot run one.
 - **Codex**: launched with `--sandbox read-only` (no writes) and
-  `-c features.shell_tool=false` (no shell). `-c mcp_servers={}` is also passed
-  and **does not work**: current Codex accepts the setting and starts your
-  configured MCP servers anyway.
+  `-c features.shell_tool=false` (no shell). `-c mcp_servers={}` is also
+  passed, and **it is a no-op on current Codex** — an upstream bug,
+  [openai/codex#16045](https://github.com/openai/codex/issues/16045), still
+  open. An empty inline TOML table merges with your existing configuration
+  instead of replacing it, so every configured server survives and Codex
+  reports no error.
 
   **So if you have MCP servers configured in `~/.codex`, the extraction agent
-  can read any file you can read.** Removing the shell only moves the work to
-  whichever configured server is general-purpose enough — measured, a Node REPL
-  server read a canary file outside the working directory, with both overrides
-  applied. A control run without the MCP override behaved identically, so the
-  setting makes no difference.
+  can read any file you can read, and fold what it finds into the handoff.**
+  Removing the shell only moves the work to whichever configured server is
+  general-purpose enough — measured, a Node REPL server read a canary file
+  outside the working directory with both overrides applied, and a control run
+  without the MCP override behaved identically.
+
+  The per-server workaround in that issue,
+  `-c mcp_servers.<name>.enabled=false`, is not used here: it needs the name of
+  every server you have configured, which this tool cannot know, and a list
+  that misses one would close nothing while appearing to close everything.
+
+  When #16045 is fixed the override starts working on its own, and this section
+  should be re-measured rather than assumed.
 
   Outbound network is closed: an HTTPS request to a hostname fails at name
   resolution (`curl` exits 6). A raw-address route was not tested, so read that

@@ -91,7 +91,10 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 ///   writes and `features.shell_tool=false` removes the shell, but any MCP
 ///   server the user has configured remains available and general-purpose
 ///   enough to serve as a file reader. `mcp_servers={}` is passed and does
-///   nothing: on codex 0.146.0 the servers still start.
+///   nothing — an upstream bug, openai/codex#16045, still open: an empty inline
+///   TOML table merges non-destructively with the existing configuration, so
+///   every configured server survives and no error is reported. Revisit this
+///   when that issue closes; the override would then start working on its own.
 ///
 ///   Measured, both arms in the same environment and working directory, one
 ///   with the override and one without: identical. Codex's own log reports the
@@ -99,12 +102,19 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 ///   back either way.
 ///
 ///   An earlier version of this comment claimed the override worked, on the
-///   strength of a run where the canary was not read. The prompt used there
-///   offered the agent an explicit way to decline, it declined, and MCP servers
-///   start lazily — so no server started, and the absence was read as the flag
-///   taking effect. It was the prompt. The same shape of error as reading
+///   strength of a run where the canary was not read. That prompt offered the
+///   agent an explicit way to decline; it declined, and MCP servers start
+///   lazily — so none started, and the absence was read as the flag taking
+///   effect. It was the prompt. The same shape of error as reading
 ///   `--allowedTools ""` as removing tools: attributing an absence to the
-///   mechanism under test rather than to the conditions of the test.
+///   mechanism under test rather than to the conditions of the test. Twice
+///   here, which is why it is written down: before recording that a defence
+///   works, run the arm without it and show the difference is the defence.
+///
+///   The per-server form the upstream issue suggests,
+///   `mcp_servers.<name>.enabled=false`, is deliberately not used. It needs the
+///   name of every server the user has configured, which this tool cannot know
+///   — and a list that misses one closes nothing while looking like it did.
 ///
 ///   So on Codex, journal text that successfully steers the extraction agent
 ///   can have it read any file the user can read.
@@ -149,11 +159,12 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
                 // way to run a command.
                 "-c",
                 "features.shell_tool=false",
-                // Accepted by the CLI and, on codex 0.146.0, entirely without
-                // effect: the configured MCP servers still start and are still
-                // usable. Kept only because it costs nothing and a later
-                // release may honour it. It is NOT a defence — see this
-                // function's doc for what the Codex path actually allows.
+                // A no-op today: openai/codex#16045 — an empty inline TOML
+                // table merges with the existing config rather than replacing
+                // it, so every configured server survives and nothing errors.
+                // Kept as a statement of intent that starts working by itself
+                // once that is fixed. It is NOT a defence — see this function's
+                // doc for what the Codex path actually allows.
                 "-c",
                 "mcp_servers={}",
                 "-C",
