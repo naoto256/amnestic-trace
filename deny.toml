@@ -1,0 +1,53 @@
+# Supply-chain policy, checked by `cargo deny check` in CI.
+#
+# This tool reads a developer's whole session transcript and hands it to another
+# process, so the dependency set is deliberately tiny — five direct crates, all
+# of them boring. The point of this file is to keep it that way: a new
+# transitive dependency under an unexpected license, or a RustSec advisory,
+# should stop a release rather than be noticed later.
+
+[advisories]
+# Anything the RustSec database knows about fails the check. There are no
+# ignores; if one becomes necessary it should arrive with a comment saying why
+# and when it can go.
+yanked = "deny"
+
+[licenses]
+# Exactly the licenses present in the current tree, and nothing else. Listing
+# them explicitly means a new dependency carrying, say, a copyleft license fails
+# CI instead of shipping quietly.
+#
+#   MIT / Apache-2.0  — everything, essentially
+#   Unlicense         — memchr, dual-licensed with MIT
+#   Unicode-3.0       — unicode-ident's data tables
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+# `deny` rather than `warn`: at this dependency count, two versions of the same
+# crate means something upstream moved and is worth looking at deliberately.
+multiple-versions = "deny"
+wildcards = "deny"
+
+# syn 2 and syn 3 do coexist, and the duplicate is accepted knowingly rather
+# than by relaxing the check above.
+#
+# syn 3 is what serde_derive uses, i.e. the one this tool actually compiles.
+# syn 2 arrives only through chrono -> iana-time-zone -> wasm-bindgen and
+# -> windows-core: the wasm and Windows branches of a timezone lookup. amtr is
+# a macOS and Linux CLI that double-forks with libc, so neither branch is ever
+# built here. Nothing can be done about it from this end either — it resolves
+# when chrono's platform shims move to syn 3.
+skip = [
+    { crate = "syn:2", reason = "wasm/windows-only path via chrono; never built for this tool's targets" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

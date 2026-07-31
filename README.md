@@ -41,23 +41,36 @@ injected — the marker has to outlive the worker and be discharged by whoever
 consumes it. A worker that lands after a timed-out reader gave up rewrites
 `ready`, and the turn after that delivers it.
 
-Every failure exits 0 and writes nothing. The next compaction redoes the work.
+Every failure writes nothing to stdout, so the host injects nothing and the turn
+proceeds. The next compaction redoes the work.
+
+The exit status says whether anything was delivered, because the caller has to
+know: `0` handed over a handoff, `1` had nothing to hand over or failed, `2` was
+called wrong. The reader discharges a snapshot only on `0`.
 
 ## Home directory
 
-`~/.local/share/amtr/` if `~/.local` exists, otherwise
-`~/.amtr/`. No environment variable takes part in this: hooks are
-spawned by the host with no guaranteed shell environment, and a path that
-resolved differently for the detached writer and the reading hook would present
-as memory loss.
+`~/.local/share/amtr/` if `~/.local` exists, otherwise `~/.amtr/`. No
+*configurable* environment variable takes part: hooks are spawned by the host
+with no guaranteed shell environment, and a tunable that resolved differently
+for the detached writer and the reading hook would present as memory loss.
+(`$HOME` itself is unavoidable, and both halves read it the same way.)
 
 ```
 <home>/
   prompt.md                        # extraction prompt; written once, then yours
+  amtr.log                         # detached worker's stderr, truncated at 256K
   prefrontal-cortex/
     <session_id>.json              # amtr_key, handoff, compaction time
-    <session_id>.marker            # extraction in flight
+    <session_id>.marker            # ongoing | ready
 ```
+
+The tree is created `0700` and every file in it `0600`. It holds a distillation
+of a working session, which deserves the same handling as a private key.
+
+When memory stops arriving, `amtr.log` is the place to look — everything the
+worker does happens after it has detached from any terminal, so this is the only
+evidence it leaves.
 
 `prompt.md` is the only customization surface. There is no config file and no
 `--prompt` flag, because the caller is a hook and nobody types the command.
@@ -68,21 +81,35 @@ as memory loss.
 cargo install --path .
 ```
 
+Or take a prebuilt binary from a release, verifying it first:
+
+```sh
+tar -xzf amtr-v0.1.0-aarch64-apple-darwin.tar.gz
+sha256sum -c SHA256SUMS        # shasum -a 256 -c on macOS
+install -m 755 amtr ~/.local/bin/amtr
+```
+
 Then install the plugin, which wires the hooks that call the binary:
 
 ```sh
-# Claude Code
-claude plugin marketplace add /absolute/path/to/amnestictrace
+# Claude Code — from the published repo
+claude plugin marketplace add naoto256/amnestic-trace
 claude plugin install amtr@naoto256-amtr
 
-# Codex (also needs `[features] codex_hooks = true` in ~/.codex/config.toml)
-codex plugin marketplace add /absolute/path/to/amnestictrace
+# Codex
+codex plugin marketplace add naoto256/amnestic-trace
 codex plugin add amtr@naoto256-amtr
 ```
 
+Substitute an absolute path for `naoto256/amnestic-trace` to install from a
+local checkout instead.
+
 Both hosts install from the same `plugin/` directory via
-`.claude-plugin/marketplace.json` at the repo root. Full install, uninstall and
-prerequisite notes are in [`plugin/README.md`](plugin/README.md).
+`.claude-plugin/marketplace.json` at the repo root. Codex additionally needs
+hooks enabled, and its first session will ask you to trust them. Those steps,
+plus uninstall and prerequisites, are in
+[`plugin/README.md`](plugin/README.md) — the authority for anything
+host-specific.
 
 Without the plugin the binary is still usable by hand, and the hooks are the
 only thing that makes it automatic.
@@ -128,14 +155,16 @@ nothing injected, and the marker must be gone.
 
 **5. Codex ids agree.** The `/amtr` skill keys rows by `$CODEX_THREAD_ID`, while
 `synthesize` keys them by the `session_id` the hook receives. These must be the
-same value or a handoff silently finds nothing. `CODEX_THREAD_ID` is known to
-match the UUID in the session's own rollout filename; confirm the hook agrees by
-logging its stdin once:
+same value or a handoff silently finds nothing.
 
-```sh
-# temporarily, in amtr-hook.sh: printf '%s' "$input" >> /tmp/amtr-hook-stdin.log
-# then compare the session_id there against echo $CODEX_THREAD_ID
-```
+Confirm it without logging anything: in a live Codex session, write a row keyed
+by `$CODEX_THREAD_ID` with a distinctive word in its handoff, mark it `ready`,
+and ask the next turn to repeat that word. If it comes back, the hook resolved
+the same id — the hook found the row *by* the id it was given.
+
+Do not dump the hook's stdin to a file to check this. That payload carries the
+user's prompt text, and a predictable path under `/tmp` is a poor place to put
+it. If you must capture it, use `umask 077` and `mktemp`, and delete it after.
 
 **6. Handoff.** In session B, run `/amtr <key from session A>`. B should receive
 A's memory; A's row must be gone (`ls` the cortex directory). With `clone`, A's

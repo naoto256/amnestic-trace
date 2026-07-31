@@ -1,6 +1,6 @@
 ---
 name: amtr
-description: Take over another session's working memory by its AMTR key. Use when the user says "/amtr <amtr_key>", "/amtr <amtr_key> clone", or otherwise asks to pick up, inherit, or continue from a snapshot named like amtr-3k9f2x1.
+description: Take over another session's working memory by its AMTR key. Use when the user says "/amtr <amtr_key>", "/amtr <amtr_key> clone", or otherwise asks to pick up, inherit, or continue from a snapshot named like amtr-ms7uix6i-3f9k2xq1.
 ---
 
 # /amtr — adopt a working-memory snapshot
@@ -28,23 +28,32 @@ dump on a real machine. CODEX_THREAD_ID matches the UUID in the session's own
 rollout filename, which is the id AMTR keys rows by.
 -->
 
-1. Run exactly one command, using whichever session variable is set:
+1. Check the key first. A valid one looks like `amtr-` followed by two
+   base36 groups separated by a hyphen — `amtr-ms7uix6i-3f9k2xq1`. It contains
+   only lowercase letters, digits and hyphens. If what the user typed does not
+   match that, stop and ask them to re-read it rather than passing it through;
+   it is a key they read off another session's output, so a transcription slip
+   is the likely explanation.
+
+2. Run exactly one command, using whichever session variable is set:
 
    ```sh
-   PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" \
-     amtr recall "${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}" --amtr-key <amtr_key>
+   PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin" \
+     amtr recall "${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}" --amtr-key "<amtr_key>"
    ```
 
-   Add `--clone` when the user asked for `clone`.
+   Substitute the key inside the quotes and keep them. Add `--clone` when the
+   user asked for `clone`.
 
-   The `PATH` prefix is there because the shell you get may not include the
-   directory the binary was installed into.
+   The `PATH` suffix is there because the shell you get may not include the
+   directory the binary was installed into. It is appended, not prepended, so
+   nothing here shadows a system tool.
 
-2. Adopt what the command prints as your own working memory for this session,
+3. Adopt what the command prints as your own working memory for this session,
    and continue the user's work from it. It is a replacement, not a reference:
    treat it as what you already knew.
 
-3. Report the AMTR key from the trailing line to the user verbatim. That line is
+4. Report the AMTR key from the trailing line to the user verbatim. That line is
    the only way the human learns the current key, so it must not be paraphrased
    away.
 

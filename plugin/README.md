@@ -7,7 +7,8 @@ session.
 
 ## What it does
 
-- **`PreCompact` hook** (`hooks/claude.json` → `tools/amtr-hook.sh precompact`).
+- **`PreCompact` hook** (declared in both `hooks/claude.json` and
+  `hooks/codex.json` → `tools/amtr-hook.sh precompact`).
   Hands the journal path to `amtr synthesize`, which records an undelivered
   snapshot and detaches a worker before returning. Extraction therefore runs in
   parallel with compaction itself rather than delaying it.
@@ -15,7 +16,8 @@ session.
   post-compaction half actually happens: neither host can inject context from a
   compaction hook, so the snapshot is delivered at the next turn start. The
   hook waits while extraction is still running, gives up after 25s injecting
-  nothing, and deletes the marker only once the text has been injected.
+  nothing, and deletes the marker only once `amtr recall` reports that it
+  actually printed a handoff — exit 0 means delivered, 1 means nothing was.
 - **`/amtr` skill** (`skills/amtr/`). A thin wrapper over
   `amtr recall --amtr-key` for the cross-session case. Compaction
   inside one session needs no key and no skill.
