@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use crate::journal::Host;
 
-/// Shipped default. Materialized at the well-known path on first run;
-/// customization is editing that file in place.
+/// Shipped default. Nothing writes it to disk: an install that never
+/// customizes anything has no `prompt.md`, so it tracks the binary. See
+/// `Store::extraction_prompt` for what overrides it.
 pub const DEFAULT_PROMPT: &str = include_str!("default-prompt.md");
 
 /// Why a synthesize produced no new snapshot.

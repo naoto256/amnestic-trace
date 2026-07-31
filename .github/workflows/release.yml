@@ -14,9 +14,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # macOS first among equals: the name collision this tool works around is a
-  # macOS one, and that is where it is used. Linux is built because nothing
-  # about the tool is platform-specific and a host runs wherever the user is.
+  # Both platforms, because nothing about the tool is platform-specific and a
+  # host runs wherever the user is.
   build:
     strategy:
       matrix:
