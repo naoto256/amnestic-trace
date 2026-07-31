@@ -122,19 +122,23 @@ The agent runs in an empty temporary directory, deleted afterwards, so nothing
 belonging to this tool — other sessions' handoffs, their keys, the prompt — sits
 where it starts.
 
-No daemon, no config file, and no environment variable. The extraction prompt
-is materialized at `~/.local/share/amtr/prompt.md` on first run and is yours to
-edit in place.
+No daemon, no config file, and no environment variable. The extraction prompt is
+built into the binary. Nothing is written to `~/.local/share/amtr/prompt.md`; if
+you create that file, it is used instead — that is the whole customization
+surface.
 
-**Upgrades never touch it.** Once that file exists it is treated as yours, so a
-newer version's default prompt is not written over it — an upgrade cannot
-silently replace prompt text you tuned. The cost is that improvements to the
-default do not reach an existing install either. To take a new default, delete
-the file and let the next run write it:
+So an install that never customizes anything carries no prompt file, and each
+upgrade brings its improved default along with it. To start from the current
+default rather than a blank page:
 
 ```sh
-rm ~/.local/share/amtr/prompt.md
+amtr default-prompt > ~/.local/share/amtr/prompt.md
 ```
+
+**Upgrades never touch that file.** Once it exists it is yours, and no version of
+this tool writes there, so an upgrade cannot replace prompt text you tuned. The
+cost is that later improvements to the default stop reaching you — re-run the
+command above (or delete the file) to pick them up.
 
 ## Install
 

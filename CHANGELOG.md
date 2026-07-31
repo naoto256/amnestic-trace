@@ -42,10 +42,14 @@ the hook outright.
 
 ### Added — extraction prompt as the customization surface
 
-A default prompt is materialized at `~/.local/share/amtr/prompt.md` on first
-run and is never overwritten afterward, including by upgrades. There is no
-config file, no environment variable, and no flag for it: the caller is a hook,
-so editing that file in place is the whole interface.
+The default prompt is compiled into the binary. `~/.local/share/amtr/prompt.md`
+overrides it if you create it, and nothing in this tool ever writes there — so
+an upgrade cannot disturb a prompt you tuned, and an install that never
+customizes one tracks the current default instead of being pinned to whichever
+version it first ran. `amtr default-prompt` writes the current default to
+stdout for anyone starting an edit. There is no config file, no environment
+variable, and no flag: the caller is a hook, so that file is the whole
+interface.
 
 ### Notes
 

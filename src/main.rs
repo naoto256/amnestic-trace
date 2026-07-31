@@ -24,7 +24,8 @@ use store::{Row, Store};
 const USAGE: &str = "usage:
   amtr synthesize <session_id> <journal_path>
   amtr recall <session_id>
-  amtr recall <session_id> --amtr-key <key> [--clone]";
+  amtr recall <session_id> --amtr-key <key> [--clone]
+  amtr default-prompt";
 
 /// What the exit status tells the caller. The reader clears the marker only
 /// when something was actually injected, so "succeeded" and "produced output"
@@ -45,6 +46,14 @@ fn main() -> ExitCode {
         ["recall", session_id] => recall(session_id),
         ["recall", session_id, "--amtr-key", key] => adopt(session_id, key, false),
         ["recall", session_id, "--amtr-key", key, "--clone"] => adopt(session_id, key, true),
+        // Prints rather than writing anywhere, so there is no path in this tool
+        // that can overwrite a prompt someone has edited, and none that needs a
+        // --force to say so. Where it lands is the shell's business:
+        //   amtr default-prompt > ~/.local/share/amtr/prompt.md
+        ["default-prompt"] => {
+            print!("{}", extract::DEFAULT_PROMPT);
+            Ok(Status::Delivered)
+        }
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);

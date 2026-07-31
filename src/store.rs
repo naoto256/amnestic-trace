@@ -82,7 +82,7 @@ impl Store {
         &self.base
     }
 
-    /// Editable in place; written once if absent and never overwritten.
+    /// Exists only if the user created it. Never written by this tool.
     pub fn prompt_path(&self) -> PathBuf {
         self.base.join("prompt.md")
     }
@@ -227,9 +227,15 @@ impl Store {
         }
     }
 
-    /// Materializes the shipped default prompt only when absent, and never
-    /// overwrites an existing one: this file is the user's to edit, and it is
-    /// the sole customization surface (no --prompt flag, no config).
+    /// The built-in prompt unless the user wrote one, which is the sole
+    /// customization surface (no --prompt flag, no config).
+    ///
+    /// Nothing is written here. Materializing the default on first run would put
+    /// a file on the disk of everyone who never asked to customize anything, and
+    /// from then on "the file exists" would pin them to the default shipped by
+    /// whichever version they installed first — an improved prompt would never
+    /// reach them. Absent means "no preference", so it tracks the binary.
+    /// `amtr default-prompt` prints the default for anyone starting an edit.
     ///
     /// An empty file is a truncated write or a slip of the editor, not
     /// customization — running on it would launch the extraction agent over a
@@ -256,9 +262,6 @@ impl Store {
                 return default.to_string();
             }
             Err(_) => {}
-        }
-        if let Err(e) = write_atomic(&path, default.as_bytes()) {
-            eprintln!("{}: could not write {}: {e}", now(), path.display());
         }
         default.to_string()
     }
@@ -594,10 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn the_default_prompt_is_materialized_once_then_read_back() {
+    fn the_default_is_used_without_leaving_a_file_that_would_pin_it() {
+        // The absence is the point: a materialized copy would make every later
+        // version read this version's default back out of it forever.
         let s = scratch();
         assert_eq!(s.extraction_prompt("DEFAULT"), "DEFAULT");
-        assert!(s.prompt_path().exists());
+        assert!(!s.prompt_path().exists(), "nothing is written on the way");
+        assert_eq!(s.extraction_prompt("A NEWER DEFAULT"), "A NEWER DEFAULT");
+
         fs::write(s.prompt_path(), "EDITED IN PLACE").unwrap();
         assert_eq!(s.extraction_prompt("DEFAULT"), "EDITED IN PLACE");
     }

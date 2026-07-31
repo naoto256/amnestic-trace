@@ -67,7 +67,7 @@ for the detached writer and the reading hook would present as memory loss.
 
 ```
 <home>/
-  prompt.md                        # extraction prompt; written once, then yours
+  prompt.md                        # optional: yours if you create it
   amtr.log                         # detached worker's stderr, truncated at 256K
   prefrontal-cortex/
     <session_id>.json              # amtr_key, handoff, compaction time
@@ -83,6 +83,15 @@ evidence it leaves.
 
 `prompt.md` is the only customization surface. There is no config file and no
 `--prompt` flag, because the caller is a hook and nobody types the command.
+
+The default prompt is built into the binary and nothing writes `prompt.md` — an
+install that never customizes it has no such file, and each upgrade brings its
+own default. Create the file to override, starting from the current default if
+you want one:
+
+```sh
+amtr default-prompt > ~/.local/share/amtr/prompt.md
+```
 
 ## Install
 
