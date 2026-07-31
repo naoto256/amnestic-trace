@@ -268,7 +268,12 @@ impl Store {
 /// owner-only *before* any bytes reach it, so the contents are never briefly
 /// world-readable, and the rename carries those bits to the final name.
 fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    // Appended to the whole file name, not swapped for the extension: a row and
+    // its marker share a stem, so `with_extension` would give both the same
+    // temp path and let one tear the other.
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}", std::process::id()));
+    let tmp = path.with_file_name(name);
     {
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create(true).truncate(true);
