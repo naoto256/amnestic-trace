@@ -87,11 +87,22 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 ///   was previously `--allowedTools ""`, which is a *pre-approval* list rather
 ///   than an availability list — under it the agent ran Bash and read files
 ///   perfectly happily, while the comment here claimed it had no tools.
-/// - **Codex**: `--sandbox read-only` stops writes. It does *not* remove the
-///   shell, and it does not confine reads to `workdir`. Codex exposes no
-///   equivalent of "no tools", so on that host an extraction agent that is
-///   successfully steered by journal content can still read files the user can
-///   read. `workdir` limits where it starts, not where it can reach.
+/// - **Codex**: there is no single "no tools" switch, so the capabilities are
+///   removed one at a time — `--sandbox read-only` for writes,
+///   `features.shell_tool=false` for the shell, `mcp_servers={}` for the
+///   configured servers.
+///
+///   The MCP override is the one that is easy to leave out and the one that
+///   matters most. Measured with a canary file outside the workspace: with the
+///   shell disabled but the server table left alone, the agent read the canary
+///   through a Node REPL server the user had configured — the shell was gone
+///   and a general-purpose tool stood in for it. With the table emptied,
+///   Codex's own log shows no server starting and the file is not read.
+///
+///   That last part rests on behaviour Codex does not document, and the same
+///   override has been observed elsewhere failing to take effect. It is worth
+///   having and not worth trusting absolutely, which is why the plugin's README
+///   says so rather than promising containment.
 ///
 ///   Outbound network is closed under these flags, which matters because it is
 ///   the difference between reading something and sending it somewhere.
@@ -129,6 +140,17 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
+                // Removes the shell tool. Verified: the agent reports having no
+                // way to run a command.
+                "-c",
+                "features.shell_tool=false",
+                // Empties the MCP server table. Without this the agent reaches
+                // whatever servers the user configured and uses one as a file
+                // reader — measured, with a canary outside the workspace read
+                // successfully through a Node REPL server. With it, Codex's own
+                // log shows no server starting at all.
+                "-c",
+                "mcp_servers={}",
                 "-C",
             ]);
             c.arg(workdir);
