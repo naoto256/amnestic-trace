@@ -257,10 +257,11 @@ fn render(row: &Row) -> String {
 
 /// An empty directory that removes itself.
 ///
-/// Created under the system temp dir rather than the store, so that the
-/// extraction agent's working directory contains nothing belonging to this
-/// tool. Owner-only, because on a host where the agent keeps a shell it will be
-/// writing into it.
+/// Created under the system temp dir rather than the store, so the extraction
+/// agent's working directory holds nothing belonging to this tool. Created
+/// owner-only, not created and then tightened — on a host where the agent keeps
+/// a shell, this is the directory it writes into, and the tightening approach
+/// leaves it group- and world-readable for the gap in between.
 struct Scratch(std::path::PathBuf);
 
 impl Scratch {
@@ -272,11 +273,18 @@ impl Scratch {
             std::process::id(),
             store::mint_key()
         ));
-        std::fs::create_dir(&dir)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            use std::os::unix::fs::DirBuilderExt;
+            // Mode applied by the same syscall that creates it, so there is no
+            // window. A failure here is returned rather than swallowed: an
+            // unprotected scratch directory is not something to proceed into
+            // quietly, and the caller treats it as a transient failure.
+            std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir(&dir)?;
         }
         Ok(Scratch(dir))
     }
@@ -355,6 +363,28 @@ mod tests {
         );
         assert!(out.contains("&lt;/amtr-handoff>"));
         assert!(out.ends_with("report this key to the user.\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_scratch_directory_is_owner_only_from_the_moment_it_exists() {
+        // Not "owner-only shortly after it exists". The previous version
+        // created it at the umask and chmod'd afterwards, leaving it 0755 in
+        // between — the same pattern this commit's sibling fix removed from the
+        // store. On Codex the extraction agent keeps a shell and works in here.
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new().unwrap();
+        let mode = std::fs::metadata(scratch.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "scratch directory created as {mode:o}");
+
+        let path = scratch.path().to_path_buf();
+        drop(scratch);
+        assert!(!path.exists(), "scratch directory outlived its owner");
     }
 
     #[test]
