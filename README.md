@@ -126,8 +126,10 @@ only thing that makes it automatic.
 ## Manual verification
 
 The pure logic — window slicing, UPSERT/move/clone, output validation — is
-covered by `cargo test`. The process-level behavior is not, because forking and
-hook wiring cannot be asserted meaningfully in a unit test. Check it by hand:
+covered by `cargo test`, and the hook script's own behavior by
+`tests/hook-regressions.sh`, which replays its cases under every shell on the
+machine that could be `/bin/sh`. What neither covers is the process level:
+forking and hook wiring cannot be asserted meaningfully. Check that by hand:
 
 **1. Detach really detaches.** With a real transcript path:
 

@@ -51,9 +51,15 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
   # The hook script is the other half of this tool and is not covered by
-  # `cargo test`: it is what the host actually executes, and a syntax error in
-  # it fails open and silently, which is precisely the failure this project
-  # cannot detect at runtime by design.
+  # `cargo test`: it is what the host actually executes, and a failure in it
+  # fails open and silently, which is precisely the failure this project cannot
+  # detect at runtime by design.
+  #
+  # Syntax checking alone is not enough. A redirection error on a POSIX special
+  # built-in terminates the shell outright — dash does this, bash and zsh do
+  # not — so a hook can parse cleanly everywhere and still die on the first
+  # line of real work on Debian and Ubuntu. Only running it catches that, which
+  # is what the regression script does, under each shell it finds.
   hook-script:
     runs-on: ubuntu-latest
     steps:
@@ -62,7 +68,12 @@ jobs:
           persist-credentials: false
 
       - name: Shell syntax
-        run: sh -n plugin/tools/amtr-hook.sh
+        run: |
+          sh -n plugin/tools/amtr-hook.sh
+          dash -n plugin/tools/amtr-hook.sh
+
+      - name: Hook behaviour
+        run: tests/hook-regressions.sh
 
 
   # `cargo deny` gates every dimension deny.toml covers — RustSec advisories,

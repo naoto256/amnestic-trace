@@ -106,7 +106,7 @@ mkdir -p "$(dirname "$amtr_home")" 2>/dev/null
 (
 	umask 077
 	mkdir -p "$amtr_home" 2>/dev/null
-	[ -e "$amtr_home/amtr.log" ] || : >>"$amtr_home/amtr.log" 2>/dev/null
+	[ -e "$amtr_home/amtr.log" ] || true >>"$amtr_home/amtr.log" 2>/dev/null
 	# An older install may have left this readable. `log_stderr_to`'s O_CREAT
 	# mode only applies to a file it creates, so an existing one keeps whatever
 	# it had — the only thing under the store not brought up to 0600.
@@ -121,8 +121,15 @@ mkdir -p "$(dirname "$amtr_home")" 2>/dev/null
 # plugin permanently silent on an otherwise healthy system. The binary points
 # its own stderr at the same file as soon as it starts, so falling back here
 # costs a few lines, not the tool.
+#
+# `true`, not `:`. POSIX says a redirection error on a *special* built-in
+# terminates the shell, and `:` is one — so `{ : >>"$log"; } || log=/dev/null`
+# never reaches its fallback: dash exits 2 on the spot and the hook is dead
+# before it dispatches. bash and zsh are lenient, which is how it survived
+# review on a Mac; `/bin/sh` is dash on Debian and Ubuntu. `true` is a regular
+# built-in and merely returns non-zero.
 log="$amtr_home/amtr.log"
-{ : >>"$log"; } 2>/dev/null || log=/dev/null
+{ true >>"$log"; } 2>/dev/null || log=/dev/null
 
 case "$event" in
 precompact)
