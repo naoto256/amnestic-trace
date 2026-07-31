@@ -164,14 +164,14 @@ fn render(v: &Value) -> Option<String> {
 /// How far the outbound defence goes is not the same on both hosts, and this
 /// note is the place a later reader is most likely to conclude the boundary is
 /// covered, so it is worth being exact: on Claude Code the extraction agent
-/// holds no tools at all; on Codex it cannot write and cannot reach the
-/// network, but it can read any file the user can read, because a configured
-/// MCP server stands in for the shell that was removed. `extract::run`
-/// documents both, and what was measured rather than assumed about each — read
-/// it there rather than trusting this summary. What *is* unconditional is that
-/// everything tag-shaped is
-/// escaped before injection, and that the prompt warns about quoted
-/// instructions in general terms, depending on no mark being present.
+/// holds no tools at all; on Codex it cannot write locally, but it can read any
+/// file the user can read and it can send — configured MCP servers and hosted
+/// tools live outside the sandbox, and some of them reach the network.
+/// `extract::run` documents what was measured rather than assumed — read it
+/// there rather than trusting this summary. What *is* unconditional is that
+/// everything tag-shaped is escaped before injection, and that the prompt warns
+/// about quoted instructions in general terms, depending on no mark being
+/// present.
 fn harvest(v: &Value, out: &mut String) {
     match v {
         Value::Object(map) => {

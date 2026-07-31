@@ -83,48 +83,39 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 /// stating plainly rather than papering over:
 ///
 /// - **Claude Code**: `--tools ""` makes the built-in tools unavailable, and
-///   `--strict-mcp-config` with no config supplied leaves no MCP servers. This
-///   was previously `--allowedTools ""`, which is a *pre-approval* list rather
-///   than an availability list — under it the agent ran Bash and read files
-///   perfectly happily, while the comment here claimed it had no tools.
-/// - **Codex**: the agent cannot be disarmed. `--sandbox read-only` stops
-///   writes and `features.shell_tool=false` removes the shell, but any MCP
-///   server the user has configured remains available and general-purpose
-///   enough to serve as a file reader. `mcp_servers={}` is passed and does
-///   nothing — an upstream bug, openai/codex#16045, still open: an empty inline
-///   TOML table merges non-destructively with the existing configuration, so
-///   every configured server survives and no error is reported. Revisit this
-///   when that issue closes; the override would then start working on its own.
+///   `--strict-mcp-config` with no config supplied leaves no MCP servers.
+///   Verified by running it: the model can describe a command it would like to
+///   run, and cannot run one.
+/// - **Codex**: the agent cannot be disarmed. What the flags do achieve, and
+///   what they do not, was measured under the exact flag set below.
 ///
-///   Measured, both arms in the same environment and working directory, one
-///   with the override and one without: identical. Codex's own log reports the
-///   server starting, and a canary file outside the working directory comes
-///   back either way.
+///   Achieved: `features.shell_tool=false` removes the shell, and
+///   `--sandbox read-only` blocks local writes — an `apply_patch` comes back
+///   "writing is blocked by read-only sandbox".
 ///
-///   An earlier version of this comment claimed the override worked, on the
-///   strength of a run where the canary was not read. That prompt offered the
-///   agent an explicit way to decline; it declined, and MCP servers start
-///   lazily — so none started, and the absence was read as the flag taking
-///   effect. It was the prompt. The same shape of error as reading
-///   `--allowedTools ""` as removing tools: attributing an absence to the
-///   mechanism under test rather than to the conditions of the test. Twice
-///   here, which is why it is written down: before recording that a defence
-///   works, run the arm without it and show the difference is the defence.
+///   Not achieved: the sandbox governs the local process, not the tools Codex
+///   hosts or proxies. `mcp_servers={}` is passed and does nothing — upstream
+///   bug openai/codex#16045, still open: an empty inline TOML table merges
+///   non-destructively with the existing configuration, so every configured
+///   server survives and no error is reported. Measured with both arms in the
+///   same environment, one with the override and one without: identical, and a
+///   canary file outside the working directory comes back either way.
 ///
 ///   The per-server form the upstream issue suggests,
 ///   `mcp_servers.<name>.enabled=false`, is deliberately not used. It needs the
 ///   name of every server the user has configured, which this tool cannot know
 ///   — and a list that misses one closes nothing while looking like it did.
 ///
-///   So on Codex, journal text that successfully steers the extraction agent
-///   can have it read any file the user can read.
+///   Outbound network is **not** closed. The hosted web-fetch tool retrieved a
+///   public URL under this flag set, and the agent's tool inventory included
+///   tools that write to a remote host over SSH, send mail, and publish a
+///   website. Those run outside the sandbox, so `read-only` does not reach
+///   them.
 ///
-///   Outbound network is closed under these flags, which matters because it is
-///   the difference between reading something and sending it somewhere.
-///   Measured, not inferred from the flag's name: an HTTPS request to a
-///   hostname fails at name resolution — `curl` exits 6 with no status. That is
-///   what was tested; a raw-address route was not, so treat this as "name
-///   resolution does not work" rather than a proof that nothing can leave.
+///   So on Codex, journal text that successfully steers the extraction agent
+///   can have it read any file the user can read *and get the contents off the
+///   machine*. This is an accepted risk, not a solved problem: extraction still
+///   runs on Codex, and the flags stay because each one removes something real.
 ///
 /// `workdir` is an empty scratch directory in both cases, so nothing of this
 /// tool's own — other sessions' handoffs, their keys, the prompt — is sitting

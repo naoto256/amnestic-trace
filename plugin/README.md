@@ -70,20 +70,27 @@ try to steer whatever reads it.
   unavailable rather than merely unapproved, and `--strict-mcp-config` with no
   config supplied leaves no MCP servers. Verified by running it: the model can
   describe a command it would like to run, and cannot run one.
-- **Codex**: launched with `--sandbox read-only` (no writes) and
-  `-c features.shell_tool=false` (no shell). `-c mcp_servers={}` is also
-  passed, and **it is a no-op on current Codex** — an upstream bug,
-  [openai/codex#16045](https://github.com/openai/codex/issues/16045), still
-  open. An empty inline TOML table merges with your existing configuration
-  instead of replacing it, so every configured server survives and Codex
-  reports no error.
+- **Codex**: launched with `--sandbox read-only`, `-c features.shell_tool=false`
+  and `-c mcp_servers={}`. Two of those three do something.
 
-  **So if you have MCP servers configured in `~/.codex`, the extraction agent
-  can read any file you can read, and fold what it finds into the handoff.**
-  Removing the shell only moves the work to whichever configured server is
-  general-purpose enough — measured, a Node REPL server read a canary file
-  outside the working directory with both overrides applied, and a control run
-  without the MCP override behaved identically.
+  **What they achieve.** The shell is genuinely gone, and local writes are
+  genuinely blocked — an `apply_patch` comes back "writing is blocked by
+  read-only sandbox".
+
+  **What they do not.** `-c mcp_servers={}` is a no-op on current Codex — an
+  upstream bug, [openai/codex#16045](https://github.com/openai/codex/issues/16045),
+  still open. An empty inline TOML table merges with your existing
+  configuration instead of replacing it, so every configured server survives
+  and Codex reports no error. Measured with both arms in the same environment:
+  identical, and a canary file outside the working directory came back either
+  way.
+
+  More importantly, the sandbox governs the *local process*. Codex's hosted
+  tools and your configured MCP servers do not run inside it, so `read-only`
+  says nothing about them. Measured under exactly this flag set: the hosted
+  web-fetch tool retrieved a public URL successfully, and the agent's tool
+  inventory included tools that write to a remote host over SSH, send mail, and
+  publish a website.
 
   The per-server workaround in that issue,
   `-c mcp_servers.<name>.enabled=false`, is not used here: it needs the name of
@@ -93,20 +100,17 @@ try to steer whatever reads it.
   When #16045 is fixed the override starts working on its own, and this section
   should be re-measured rather than assumed.
 
-  Outbound network is closed: an HTTPS request to a hostname fails at name
-  resolution (`curl` exits 6). A raw-address route was not tested, so read that
-  as name resolution not working rather than proof that nothing can leave.
-
 **What this means for the Codex path.** Journal text that successfully steers
-the extraction agent can have it read a file and fold the contents into the
-handoff, which is injected into your next turn — where you would see it. It
-cannot write anything and cannot reach the network. So the realistic failure is
-unwanted material appearing in your own context, not leaving your machine.
+the extraction agent can have it read any file you can read and **send the
+contents off your machine**. It cannot write locally, and whatever it folds
+into the handoff you would see in your next turn — but exfiltration does not
+need the handoff, and the network path does not go through the sandbox.
 
-If you want this closed rather than bounded, either use the Claude Code path,
-where the agent genuinely has no tools, or point Codex at a `CODEX_HOME` that
-carries authentication and defines no MCP servers — at the cost of maintaining
-a second Codex home.
+This is stated so you can decide, not because it is fixed. If you want it
+closed rather than described, either use the Claude Code path, where the agent
+genuinely has no tools, or point Codex at a `CODEX_HOME` that carries
+authentication and defines no MCP servers — at the cost of maintaining a second
+Codex home.
 
 To check your own setup, run the extraction command by hand against a canary
 file outside the working directory and see whether it comes back. Phrase the
