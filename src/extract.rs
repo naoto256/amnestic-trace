@@ -15,16 +15,10 @@ pub const DEFAULT_PROMPT: &str = include_str!("default-prompt.md");
 
 /// Why a synthesize produced no new snapshot.
 ///
-/// Two variants, because two is how many the caller distinguishes. There were
-/// four — transient, permanent, rejected, plus "nothing to do" — and the
-/// difference between the first three was never acted on: they fed a single
-/// catch-all arm that treated them identically. Four names for one behavior is
-/// a claim that retry policy exists, and reading them invited the belief that
-/// something downstream was reasoning about recoverability. Nothing was.
-///
-/// What survives is the one distinction that changes anything: whether this was
-/// a failure at all. Everything else belongs in the message, which is what the
-/// log actually prints.
+/// Two variants, because two is how many the caller distinguishes: whether this
+/// was a failure at all. Nothing downstream reasons about recoverability, so
+/// naming kinds of failure would claim a retry policy that does not exist.
+/// Everything else belongs in the message, which is what the log prints.
 #[derive(Debug)]
 pub enum Failed {
     /// Nothing new in the journal. Not a failure — there was no work.
@@ -128,9 +122,9 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
                 "-p",
                 "--output-format",
                 "text",
-                // Availability, not pre-approval. `--allowedTools ""` looks
-                // like it does this and does not: it approves nothing in
-                // advance while leaving every tool present and callable.
+                // Availability, not pre-approval: `--allowedTools ""` would
+                // approve nothing in advance while leaving every tool present
+                // and callable.
                 "--tools",
                 "",
                 // Ignore every configured MCP server. None is passed, so this
@@ -237,12 +231,12 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
 /// as beginning at its first section, so anything earlier is not part of it.
 ///
 /// A prompt edited to drop the headings has no first section, and then this
-/// leaves the output alone rather than emptying it.
+/// leaves the output alone rather than emptying it. The prompt is the user's to
+/// rewrite, so that case is reachable.
 fn strip_preamble(raw: &str) -> String {
     let text = raw.trim_start();
-    // Already at the first section: there is nothing in front of it to drop.
-    // This has to be checked before searching for a heading mid-text, or the
-    // search finds the *second* section and the first one is cut away.
+    // Checked before searching for a heading mid-text, or the search finds the
+    // *second* section and cuts the first one away.
     if text.starts_with("## ") {
         return text.to_string();
     }
@@ -308,9 +302,8 @@ mod tests {
 
     #[test]
     fn a_well_formed_handoff_keeps_its_very_first_section() {
-        // Regression: searching for a heading mid-text finds the *second* one,
-        // so obeying the prompt exactly cost the session its standing rules —
-        // the single thing the handoff most needs to carry.
+        // Standing rules are the single thing the handoff most needs to carry,
+        // and they are in the first section.
         let raw = "## Rules and rulings\n- \"never use the Foo library\"\n\n\
                    ## Task map and position\nfixing the parser\n";
         let out = strip_preamble(raw);
@@ -324,8 +317,6 @@ mod tests {
 
     #[test]
     fn a_headingless_prompt_keeps_its_output_rather_than_losing_it() {
-        // The prompt is the user's to rewrite; without sections there is no
-        // boundary to cut at, and cutting everything would be worse.
         let raw = "just a paragraph of handoff text with no headings at all";
         assert_eq!(strip_preamble(raw), raw);
     }

@@ -148,14 +148,8 @@ fn render(v: &Value) -> Option<String> {
 /// Collects human-meaningful strings, keyed by field name so that identifiers,
 /// paths and base64 blobs elsewhere in the record do not leak into the window.
 ///
-/// The window is passed on unannotated. There was a scheme here that tagged
-/// tool-originated text so the extraction prompt could tell the agent to
-/// discount it; it is gone, deliberately. It only ever fired on one of the two
-/// shapes tool results actually take, so the prompt was relying on a mark that
-/// was missing from roughly half the cases — worse than not claiming the
-/// protection at all.
-///
-/// The deeper reason not to rebuild it: by the time hostile text is in a
+/// The window is passed on unannotated, and nothing should reintroduce a
+/// scheme for marking tool-originated text: by the time hostile text is in a
 /// journal, the session that read it was already exposed, and filtering here
 /// does nothing about that. What this tool adds is reach — a handoff carries
 /// forward across compactions, and is read by an agent with none of the
@@ -271,11 +265,9 @@ mod tests {
 
     #[test]
     fn the_window_carries_journal_text_through_unannotated() {
-        // Tool output is neither marked nor removed. This is deliberate: the
-        // scheme that marked it covered only one of the two shapes tool results
-        // take, so the prompt was leaning on a mark that was absent from about
-        // half of them. Defending the boundary happens on the way out instead —
-        // no tools for the extraction agent, and escaping before injection.
+        // Tool output is neither marked nor removed. Defending the boundary
+        // happens on the way out instead — fewest possible tools for the
+        // extraction agent, and escaping before injection.
         let line = concat!(
             r#"{"type":"user","sessionId":"s1","timestamp":"2026-06-23T16:12:00.000Z","#,
             r#""message":{"role":"user","content":[{"type":"tool_result","content":"#,

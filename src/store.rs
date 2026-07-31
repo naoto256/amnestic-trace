@@ -102,10 +102,9 @@ impl Store {
     }
 
     /// `Ok(None)` means only "no row here yet", which is the ordinary state
-    /// before a first compaction. A row that exists but cannot be read or
-    /// parsed is an error: collapsing the two into `None` turned a corrupt
-    /// snapshot into a silent first-compaction, discarding everything carried
-    /// so far with nothing anywhere saying why.
+    /// before a first compaction. A row that exists but cannot be read is an
+    /// error: collapsing the two would turn a corrupt snapshot into a silent
+    /// first-compaction, discarding everything carried so far.
     pub fn load(&self, session_id: &str) -> io::Result<Option<Row>> {
         let raw = match fs::read_to_string(self.row_path(session_id)) {
             Ok(raw) => raw,
@@ -231,10 +230,11 @@ impl Store {
     /// Materializes the shipped default prompt only when absent, and never
     /// overwrites an existing one: this file is the user's to edit, and it is
     /// the sole customization surface (no --prompt flag, no config).
-    /// An empty file is not customization, it is a truncated write or a slip of
-    /// the editor — and using it would launch the extraction agent over a whole
-    /// transcript with no instructions at all, whose output then overwrites
-    /// working memory. Falls back to the default and says so.
+    ///
+    /// An empty file is a truncated write or a slip of the editor, not
+    /// customization — running on it would launch the extraction agent over a
+    /// whole transcript with no instructions, and its output overwrites working
+    /// memory. Falls back to the default and says so.
     pub fn extraction_prompt(&self, default: &str) -> String {
         let path = self.prompt_path();
         match fs::read_to_string(&path) {
@@ -322,12 +322,11 @@ fn restrict_dir(_path: &Path) {}
 /// Session ids are host-minted UUIDs in practice; this only guards against a
 /// hostile or exotic id escaping the sessions directory.
 ///
-/// Substitution is per **byte**, not per character. The reader is `sed`, which
-/// counts bytes, so counting characters here made the two disagree on anything
-/// multibyte: `ünïcode` became `_n_code` for the writer and `__n__code` for the
-/// reader, and the reader would look for a marker at a name the writer never
-/// wrote. Bytes are the representation both sides can agree on without either
-/// of them knowing about encodings.
+/// Substitution is per **byte**, not per character, because the reader is `sed`
+/// and `sed` counts bytes. Counting characters here makes the two disagree on
+/// anything multibyte, and the reader then looks for a marker at a name the
+/// writer never wrote. Bytes are the representation both sides can agree on
+/// without either knowing about encodings.
 pub fn slug(session_id: &str) -> String {
     let cleaned: String = session_id
         .bytes()
@@ -625,9 +624,10 @@ mod tests {
         let derivation = extract_slug_derivation(HOOK);
 
         // Deliberately includes ids the hook's own character-class gate would
-        // reject. Testing only ids that pass the gate would make this assert
-        // something weaker than its name claims, and would leave the agreement
-        // resting on that gate rather than on the two rules matching.
+        // reject, and multibyte ones. Testing only ids that pass the gate would
+        // rest the agreement on that gate rather than on the two rules
+        // matching, and an all-ASCII list would cover exactly the inputs where
+        // the two implementations cannot disagree.
         let ids = [
             "019fb5b0-b8d6-7432-a1ae-d03d37b6b32a",
             "..",
@@ -644,11 +644,6 @@ mod tests {
             "a;rm -rf /",
             "//",
             "$(whoami)",
-            // Multibyte. The list above was entirely ASCII, which meant this
-            // test asserted agreement over exactly the inputs where the two
-            // implementations could not disagree — while its own comment
-            // claimed it established the rules match regardless of the gate.
-            // Rust counted characters and sed counted bytes.
             "ünïcode",
             "セッション",
             "e\u{0301}combining",
@@ -676,8 +671,8 @@ mod tests {
     /// Lifts the two lines that derive `slug` out of the hook script.
     ///
     /// Panics rather than returning nothing when they cannot be found: a test
-    /// that quietly stopped exercising the real rule would restore exactly the
-    /// blind spot it exists to remove.
+    /// that quietly stopped exercising the real rule is the blind spot it
+    /// exists to remove.
     fn extract_slug_derivation(script: &str) -> String {
         let lines: Vec<&str> = script
             .lines()

@@ -1,9 +1,9 @@
-//! Detaching from the host by double fork. macOS ships no `setsid(1)`, so it
-//! is done in-process; it completes before any heavy initialization so the
-//! window in which the host can kill the worker stays narrow.
+//! Detaching from the host by double fork. macOS ships no `setsid(1)`, so it is
+//! done in-process, before any heavy initialization so the window in which the
+//! host can kill the worker stays narrow.
 //!
-//! The worker this produces is not a daemon: it does one extraction and exits.
-//! Cutting it loose from the host's process group is the whole point.
+//! The worker is not a daemon: it does one extraction and exits. Cutting it
+//! loose from the host's process group is the whole point.
 
 use std::path::Path;
 
@@ -23,10 +23,10 @@ pub enum Role {
 
 /// Points stderr at the log, creating the directory if it does not exist.
 ///
-/// Called *before* anything that can fail, not after the fork. The store's own
-/// setup is exactly what fails when the directory is unwritable, and a hook
-/// discards this process's output, so a failure before the redirect leaves no
-/// evidence anywhere on disk: the memory is dead and nothing says so.
+/// Called *before* anything that can fail, not after the fork: the store's own
+/// setup is what fails when the directory is unwritable, and a hook discards
+/// this process's output, so a failure before the redirect leaves no evidence
+/// anywhere.
 ///
 /// Best-effort by nature. If the log itself cannot be opened there is nowhere
 /// left to complain to, and failing the synthesize over it would trade a
@@ -55,19 +55,18 @@ pub fn log_stderr_to(dir: &Path) {
     }
 }
 
-/// Detaches the worker from the host's process group.
-///
-/// The caller returns immediately in the original process, so the hook exits
-/// while extraction runs in parallel with compaction itself.
+/// Detaches the worker from the host's process group. The caller returns
+/// immediately in the original process, so the hook exits while extraction runs
+/// in parallel with compaction itself.
 ///
 /// # Assumes a single-threaded process
 ///
 /// `fork` carries over only the calling thread. A lock held by any other thread
 /// at that instant stays locked forever in the child, and the allocator's is
 /// enough to hang it on the next allocation. Nothing before this point starts a
-/// thread today — the work that does (the extraction subprocess's reader and
-/// writer) happens after — and anything that changes must keep it that way, or
-/// move the fork ahead of itself.
+/// thread — the extraction subprocess's reader and writer come after — and
+/// anything that changes must keep it that way or move the fork ahead of
+/// itself.
 pub fn detach() -> Role {
     unsafe {
         match libc::fork() {
