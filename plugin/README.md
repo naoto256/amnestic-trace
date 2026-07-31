@@ -44,9 +44,10 @@ than fail visibly. Leaving it to the host's default is the honest default.
   cargo install --path .
   ```
 
-  That puts `amtr` in `~/.cargo/bin`. `~/.local/bin` works too; the
-  hook script prepends both, plus the Homebrew and `/usr/local` prefixes,
-  because hook execution inherits a minimal `PATH` that omits them.
+  That puts `amtr` in `~/.cargo/bin`. `~/.local/bin` works too; the hook script
+  appends both, plus the Homebrew and `/usr/local` prefixes, because hook
+  execution inherits a minimal `PATH` that omits them. Appended rather than
+  prepended, so nothing here shadows the system's own tools.
 
   The name is `amtr` rather than `amt` because macOS ships an unrelated
   root-owned `/usr/sbin/amt` that wins on a default `PATH`.
@@ -54,6 +55,35 @@ than fail visibly. Leaving it to the host's default is the honest default.
 - The host CLI that produced the journal (`claude` or `codex`) must be on
   `PATH` and authenticated — that is what performs the extraction. AMT reads
   the journal to decide which one to launch and never holds credentials itself.
+
+## What the extraction agent can do
+
+Summarizing needs no tools, so the agent is launched with as few as each host
+allows. That is not the same amount on both, and the difference is worth
+knowing before you install this.
+
+The agent's input is a session journal, which contains text this tool did not
+author — fetched pages, dependency output, error messages. Text like that can
+try to steer whatever reads it.
+
+- **Claude Code**: launched with `--tools ""`, so the built-in tools are
+  unavailable rather than merely unapproved, and `--strict-mcp-config` with no
+  config supplied leaves no MCP servers. Verified by running it: the model can
+  describe a command it would like to run, and cannot run one.
+- **Codex**: launched with `--sandbox read-only`, which prevents writes. Codex
+  offers no equivalent of "no tools", so **the agent keeps a shell and can read
+  files you can read** — the sandbox confines writing, not reading, and the
+  working directory sets where it starts rather than where it can reach.
+
+So on Codex, a journal that successfully steers the extraction agent could have
+it read something outside the working directory and fold that into the handoff,
+which is injected into the next turn. If that matters for your threat model,
+prefer the Claude Code path, or read `prompt.md` and keep an eye on what lands
+in `prefrontal-cortex/`.
+
+The agent runs in an empty temporary directory, deleted afterwards, so nothing
+belonging to this tool — other sessions' handoffs, their keys, the prompt — sits
+where it starts.
 
 No daemon, no config file, and no environment variable. The extraction prompt
 is materialized at `~/.local/share/amtr/prompt.md` on first run and is yours to

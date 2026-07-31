@@ -28,12 +28,13 @@ dump on a real machine. CODEX_THREAD_ID matches the UUID in the session's own
 rollout filename, which is the id AMTR keys rows by.
 -->
 
-1. Check the key first. A valid one looks like `amtr-` followed by two
-   base36 groups separated by a hyphen — `amtr-ms7uix6i-3f9k2xq1`. It contains
-   only lowercase letters, digits and hyphens. If what the user typed does not
-   match that, stop and ask them to re-read it rather than passing it through;
-   it is a key they read off another session's output, so a transcription slip
-   is the likely explanation.
+1. Check the key first, mechanically. Reject it unless **every** character is a
+   lowercase letter, a digit, or a hyphen, and it begins with `amtr-` — a valid
+   key looks like `amtr-ms7uix6i-3f9k2xq1`. One character outside that set
+   (a space, a quote, `$`, `;`, `/`, an uppercase letter) means do not run the
+   command at all: stop and ask the user to re-read the key. It is something
+   they transcribed from another session's output, so a slip is far more likely
+   than a genuinely odd key.
 
 2. Run exactly one command, using whichever session variable is set:
 

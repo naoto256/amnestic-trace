@@ -54,10 +54,19 @@ else
 fi
 
 # Must match `slug()` in src/store.rs exactly, or the reader looks for a marker
-# at a path the writer never wrote. The character class is already guaranteed by
-# the validation above; what remains is the binary's leading/trailing dot trim
-# and its empty-string fallback. CI cross-checks the two implementations.
-slug=$(printf '%s' "$session_id" | sed 's/^\.*//; s/\.*$//')
+# at a path the writer never wrote. All three of the binary's steps are here:
+# replace anything outside the allowed class, trim leading and trailing dots,
+# fall back to `_` when nothing survives.
+#
+# The character-class gate above already rejects ids that would need the first
+# step, which made it look redundant. It is not: relying on the gate leaves the
+# agreement resting on a check somewhere else in the file, and a later edit
+# loosening that check would silently desynchronise the two implementations.
+#
+# A test in src/store.rs lifts these two lines out of this file and runs them
+# against the binary's rule, so changing them here without changing there fails
+# `cargo test`.
+slug=$(printf '%s' "$session_id" | sed 's/[^A-Za-z0-9._-]/_/g; s/^\.*//; s/\.*$//')
 [ -n "$slug" ] || slug=_
 marker="$amtr_home/prefrontal-cortex/$slug.marker"
 
@@ -85,7 +94,12 @@ precompact)
 	fi
 	[ -n "$journal" ] && [ -f "$journal" ] || exit 0
 	# Returns as soon as the worker has detached and the marker is on disk.
-	amtr synthesize "$session_id" "$journal" >/dev/null 2>&1
+	#
+	# stderr goes to the log rather than /dev/null. The binary redirects its own
+	# stderr there as soon as it can, but it cannot do that before resolving the
+	# home directory — and "the home directory would not resolve" is exactly the
+	# failure that would otherwise leave no trace at all.
+	amtr synthesize "$session_id" "$journal" >/dev/null 2>>"$amtr_home/amtr.log"
 	;;
 recall)
 	# The marker is an undelivered snapshot, not a "compaction happened" flag.

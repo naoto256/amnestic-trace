@@ -52,8 +52,13 @@ so editing that file in place is the whole interface.
 The executable is `amtr` rather than `amt` because macOS ships an unrelated
 root-owned `/usr/sbin/amt` that wins on a default `PATH`.
 
-Stored memory is deliberately ephemeral. Every failure path writes nothing and
-exits zero, on the principle that the next compaction redoes the work.
+Stored memory is deliberately ephemeral. Every failure path writes nothing to
+stdout, so the host injects nothing and the turn proceeds, on the principle that
+the next compaction redoes the work.
+
+The exit status distinguishes what happened, because the delivery hook depends
+on it: `0` handed over a handoff, `1` had nothing to hand over or failed, `2`
+was called wrong. A caller that discharges a snapshot should do so only on `0`.
 
 [Unreleased]: https://github.com/naoto256/amnestic-trace/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/naoto256/amnestic-trace/releases/tag/v0.1.0

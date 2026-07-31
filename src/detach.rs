@@ -11,53 +11,36 @@ use std::path::Path;
 /// to accumulate history — this tool keeps no history of anything else either.
 const MAX_LOG_BYTES: u64 = 256 * 1024;
 
-/// Returns `true` in the process that should do the work.
+/// Which side of the fork the caller is on.
+pub enum Role {
+    /// The hook's own process. Return immediately.
+    Caller,
+    /// Detached, reparented, and free to take as long as it needs.
+    Worker,
+    /// Forking failed. There is no safe way to continue here — see `synthesize`.
+    CannotDetach,
+}
+
+/// Points stderr at the log, creating the directory if it does not exist.
 ///
-/// The caller returns immediately in the original process, so the hook exits
-/// while extraction runs in parallel with compaction itself. If forking fails
-/// we return `true` in the original process: doing the work inline is worse
-/// than detached but still better than losing the snapshot.
+/// Called *before* anything that can fail, not after the fork. The store's own
+/// setup is exactly what fails when the directory is unwritable, and a hook
+/// discards this process's output, so a failure before the redirect leaves no
+/// evidence anywhere on disk: the memory is dead and nothing says so.
 ///
-/// `log_dir` receives the worker's stderr. Everything after this point is
-/// invisible by construction — no terminal, no exit status anyone reads, and a
-/// design that swallows failures on purpose — so without somewhere for the
-/// diagnostics to land, "the memory silently stopped working" has no evidence
-/// behind it at all.
-pub fn detach(log_dir: &Path) -> bool {
-    let log_path = log_dir.join("amtr.log");
+/// Best-effort by nature. If the log itself cannot be opened there is nowhere
+/// left to complain to, and failing the synthesize over it would trade a
+/// missing diagnostic for a missing snapshot.
+pub fn log_stderr_to(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let log_path = dir.join("amtr.log");
     if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
         let _ = std::fs::remove_file(&log_path);
     }
 
+    let mut buf = log_path.as_os_str().as_encoded_bytes().to_vec();
+    buf.push(0);
     unsafe {
-        match libc::fork() {
-            -1 => return true,
-            0 => {}
-            _ => return false, // original process: hook returns now
-        }
-        // New session: we are no longer in the host's process group, so a
-        // group-wide kill on hook timeout does not reach us.
-        libc::setsid();
-        match libc::fork() {
-            -1 => {}
-            0 => {}
-            _ => libc::_exit(0), // reparented to init, so nobody waits on us
-        }
-        // Close the hook's stdio pipes; a host that reads them to EOF would
-        // otherwise block on a worker that outlives it.
-        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
-        if devnull >= 0 {
-            libc::dup2(devnull, 0);
-            libc::dup2(devnull, 1);
-            if devnull > 2 {
-                libc::close(devnull);
-            }
-        }
-
-        // stderr goes to the log instead. Opened owner-only, appending, so
-        // concurrent workers interleave whole writes rather than overwrite.
-        let mut buf = log_path.as_os_str().as_encoded_bytes().to_vec();
-        buf.push(0);
         let fd = libc::open(
             buf.as_ptr() as *const libc::c_char,
             libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
@@ -68,9 +51,49 @@ pub fn detach(log_dir: &Path) -> bool {
             if fd > 2 {
                 libc::close(fd);
             }
-        } else if devnull >= 0 {
-            libc::dup2(devnull, 2);
         }
     }
-    true
+}
+
+/// Detaches the worker from the host's process group.
+///
+/// The caller returns immediately in the original process, so the hook exits
+/// while extraction runs in parallel with compaction itself.
+///
+/// # Assumes a single-threaded process
+///
+/// `fork` carries over only the calling thread. A lock held by any other thread
+/// at that instant stays locked forever in the child, and the allocator's is
+/// enough to hang it on the next allocation. Nothing before this point starts a
+/// thread today — the work that does (the extraction subprocess's reader and
+/// writer) happens after — and anything that changes must keep it that way, or
+/// move the fork ahead of itself.
+pub fn detach() -> Role {
+    unsafe {
+        match libc::fork() {
+            -1 => return Role::CannotDetach,
+            0 => {}
+            _ => return Role::Caller, // original process: hook returns now
+        }
+        // New session: we are no longer in the host's process group, so a
+        // group-wide kill on hook timeout does not reach us.
+        libc::setsid();
+        match libc::fork() {
+            -1 => {}
+            0 => {}
+            _ => libc::_exit(0), // reparented to init, so nobody waits on us
+        }
+        // Close the hook's stdin and stdout; a host that reads them to EOF
+        // would otherwise block on a worker that outlives it. stderr is left
+        // alone: it already points at the log, opened before any of this.
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+        if devnull >= 0 {
+            libc::dup2(devnull, 0);
+            libc::dup2(devnull, 1);
+            if devnull > 2 {
+                libc::close(devnull);
+            }
+        }
+    }
+    Role::Worker
 }

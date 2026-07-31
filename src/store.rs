@@ -64,7 +64,13 @@ impl Store {
     /// unreleased work — so it deserves the same treatment as a private key
     /// rather than the default umask.
     pub fn at(base: PathBuf) -> io::Result<Store> {
-        fs::create_dir_all(base.join(CORTEX))?;
+        // Created 0700 in the first place where the platform allows it, rather
+        // than created then tightened — the latter leaves a brief window at the
+        // umask's permissions with the directory already in place.
+        create_dir_private(&base)?;
+        create_dir_private(&base.join(CORTEX))?;
+        // Still applied afterwards, so a store from an older version (or one
+        // whose parent already existed) is brought up to the same footing.
         restrict_dir(&base);
         restrict_dir(&base.join(CORTEX));
         Ok(Store { base })
@@ -95,9 +101,20 @@ impl Store {
             .join(format!("{}.marker", slug(session_id)))
     }
 
-    pub fn load(&self, session_id: &str) -> Option<Row> {
-        let raw = fs::read_to_string(self.row_path(session_id)).ok()?;
-        serde_json::from_str(&raw).ok()
+    /// `Ok(None)` means only "no row here yet", which is the ordinary state
+    /// before a first compaction. A row that exists but cannot be read or
+    /// parsed is an error: collapsing the two into `None` turned a corrupt
+    /// snapshot into a silent first-compaction, discarding everything carried
+    /// so far with nothing anywhere saying why.
+    pub fn load(&self, session_id: &str) -> io::Result<Option<Row>> {
+        let raw = match fs::read_to_string(self.row_path(session_id)) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|e| io::Error::other(format!("stored row is not readable: {e}")))
     }
 
     /// UPSERT. Temp file + atomic rename, so a reader never sees a torn row.
@@ -114,24 +131,33 @@ impl Store {
     }
 
     /// Directory scan: the row count is at most the session count.
-    pub fn find_by_key(&self, amtr_key: &str) -> Option<Row> {
-        for entry in fs::read_dir(self.base.join(CORTEX)).ok()?.flatten() {
+    ///
+    /// A row that cannot be read is reported rather than skipped. This is the
+    /// lookup behind a cross-session handoff, where the key was typed by a
+    /// human off another session's output — so "no such key" and "the row
+    /// holding that key is corrupt" lead to completely different next steps,
+    /// and answering both with silence sends the user hunting for a typo that
+    /// is not there.
+    pub fn find_by_key(&self, amtr_key: &str) -> io::Result<Option<Row>> {
+        for entry in fs::read_dir(self.base.join(CORTEX))?.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let row: Row = match fs::read_to_string(&path)
-                .ok()
-                .and_then(|r| serde_json::from_str(&r).ok())
-            {
-                Some(r) => r,
-                None => continue,
+            let raw = match fs::read_to_string(&path) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    eprintln!("{}: cannot read {}: {e}", now(), path.display());
+                    continue;
+                }
             };
-            if row.amtr_key.as_deref() == Some(amtr_key) {
-                return Some(row);
+            match serde_json::from_str::<Row>(&raw) {
+                Ok(row) if row.amtr_key.as_deref() == Some(amtr_key) => return Ok(Some(row)),
+                Ok(_) => {}
+                Err(e) => eprintln!("{}: {} is not readable: {e}", now(), path.display()),
             }
         }
-        None
+        Ok(None)
     }
 
     /// MOVE: the row's session_id becomes the caller's and the giving session
@@ -177,6 +203,40 @@ impl Store {
         write_atomic(&self.marker_path(session_id), b"ready")
     }
 
+    /// A row written but never marked deliverable is unreachable: the reader
+    /// only looks when a marker says to. Worth a few attempts before giving up,
+    /// since the usual cause is transient.
+    pub fn mark_ready_retrying(&self, session_id: &str) -> io::Result<()> {
+        let mut last = None;
+        for attempt in 0..3 {
+            match self.mark_ready(session_id) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("could not mark deliverable")))
+    }
+
+    /// Removes the marker only while it still says `ongoing`.
+    ///
+    /// A failed synthesize used to delete whatever marker it found. When the
+    /// failure was "nothing new in this window", that deleted the *previous*
+    /// compaction's `ready` — the row stayed on disk and no reader ever came
+    /// back for it, so a working handoff was lost to a later compaction that
+    /// did nothing at all. This withdraws only the claim this run staked.
+    pub fn withdraw_own_claim(&self, session_id: &str) -> io::Result<()> {
+        let path = self.marker_path(session_id);
+        match fs::read_to_string(&path) {
+            Ok(state) if state.trim() == "ongoing" => self.unmark(session_id),
+            // `ready` belongs to someone else's snapshot; absent is already the
+            // desired state.
+            _ => Ok(()),
+        }
+    }
+
     /// Test-only: at runtime the reader is the hook script, which is shell, so
     /// nothing in the binary ever reads a marker back.
     #[cfg(test)]
@@ -196,12 +256,35 @@ impl Store {
     /// Materializes the shipped default prompt only when absent, and never
     /// overwrites an existing one: this file is the user's to edit, and it is
     /// the sole customization surface (no --prompt flag, no config).
+    /// An empty file is not customization, it is a truncated write or a slip of
+    /// the editor — and using it would launch the extraction agent over a whole
+    /// transcript with no instructions at all, whose output then overwrites
+    /// working memory. Falls back to the default and says so.
     pub fn extraction_prompt(&self, default: &str) -> String {
         let path = self.prompt_path();
-        if let Ok(text) = fs::read_to_string(&path) {
-            return text;
+        match fs::read_to_string(&path) {
+            Ok(text) if !text.trim().is_empty() => return text,
+            Ok(_) => {
+                eprintln!(
+                    "{}: {} is empty; using the built-in prompt",
+                    now(),
+                    path.display()
+                );
+                return default.to_string();
+            }
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                eprintln!(
+                    "{}: cannot read {}, using the built-in prompt: {e}",
+                    now(),
+                    path.display()
+                );
+                return default.to_string();
+            }
+            Err(_) => {}
         }
-        let _ = write_atomic(&path, default.as_bytes());
+        if let Err(e) = write_atomic(&path, default.as_bytes()) {
+            eprintln!("{}: could not write {}: {e}", now(), path.display());
+        }
         default.to_string()
     }
 }
@@ -224,6 +307,30 @@ fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
         f.sync_all()?;
     }
     fs::rename(&tmp, path)
+}
+
+/// Creates a directory owner-only from the moment it exists.
+///
+/// `create_dir_all` honours the umask, so the tighten-afterwards approach has
+/// the directory readable for as long as it takes to call `chmod`. Parents are
+/// created first with the ordinary call — they are `~/.local/share` and the
+/// like, which are not ours to restrict.
+fn create_dir_private(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(path)
+    }
 }
 
 /// Best-effort: a store that exists but could not be tightened is still better
@@ -282,7 +389,16 @@ fn random_u64() -> u64 {
     let mut bytes = [0u8; 8];
     match fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)) {
         Ok(()) => u64::from_le_bytes(bytes),
-        Err(_) => std::process::id() as u64,
+        Err(e) => {
+            // Said out loud. Falling back to the pid makes the key guessable,
+            // and a security property that degrades in silence is worse than
+            // one that was never claimed.
+            eprintln!(
+                "{}: no CSPRNG available, key falls back to a guessable value: {e}",
+                now()
+            );
+            std::process::id() as u64
+        }
     }
 }
 
@@ -328,41 +444,47 @@ mod tests {
         let s = scratch();
         s.save(&row("a", Some("amtr-1"), "first")).unwrap();
         s.save(&row("a", Some("amtr-2"), "second")).unwrap();
-        let got = s.load("a").unwrap();
+        let got = s.load("a").unwrap().unwrap();
         assert_eq!(got.handoff, "second");
         assert_eq!(got.amtr_key.as_deref(), Some("amtr-2"));
         assert!(
-            s.find_by_key("amtr-1").is_none(),
+            s.find_by_key("amtr-1").unwrap().is_none(),
             "superseded key must not resolve"
         );
     }
 
     #[test]
     fn missing_session_reads_as_none() {
-        assert!(scratch().load("nobody").is_none());
+        assert!(scratch().load("nobody").unwrap().is_none());
     }
 
     #[test]
     fn move_transfers_the_row_and_the_giver_forgets() {
         let s = scratch();
         s.save(&row("giver", Some("amtr-k"), "state")).unwrap();
-        let moved = s.take(&s.find_by_key("amtr-k").unwrap(), "taker").unwrap();
+        let moved = s
+            .take(&s.find_by_key("amtr-k").unwrap().unwrap(), "taker")
+            .unwrap();
 
         assert_eq!(moved.session_id, "taker");
-        assert_eq!(s.load("taker").unwrap().handoff, "state");
+        assert_eq!(s.load("taker").unwrap().unwrap().handoff, "state");
         assert!(
-            s.load("giver").is_none(),
+            s.load("giver").unwrap().is_none(),
             "giver's next synthesize must be a first-compaction"
         );
-        assert_eq!(s.find_by_key("amtr-k").unwrap().session_id, "taker");
+        assert_eq!(
+            s.find_by_key("amtr-k").unwrap().unwrap().session_id,
+            "taker"
+        );
     }
 
     #[test]
     fn move_onto_the_same_session_is_a_no_op_not_a_deletion() {
         let s = scratch();
         s.save(&row("same", Some("amtr-k"), "state")).unwrap();
-        s.take(&s.find_by_key("amtr-k").unwrap(), "same").unwrap();
-        assert_eq!(s.load("same").unwrap().handoff, "state");
+        s.take(&s.find_by_key("amtr-k").unwrap().unwrap(), "same")
+            .unwrap();
+        assert_eq!(s.load("same").unwrap().unwrap().handoff, "state");
     }
 
     #[test]
@@ -371,7 +493,7 @@ mod tests {
         s.save(&row("giver", Some("amtr-k"), "state")).unwrap();
         let copy = s
             .clone_to(
-                &s.find_by_key("amtr-k").unwrap(),
+                &s.find_by_key("amtr-k").unwrap().unwrap(),
                 "taker",
                 "2026-08-01T12:00:00.000Z",
             )
@@ -384,11 +506,14 @@ mod tests {
         );
         assert_eq!(copy.compacted_at, "2026-08-01T12:00:00.000Z");
         assert_eq!(
-            s.load("giver").unwrap().handoff,
+            s.load("giver").unwrap().unwrap().handoff,
             "state",
             "clone is not a move"
         );
-        assert_eq!(s.find_by_key("amtr-k").unwrap().session_id, "giver");
+        assert_eq!(
+            s.find_by_key("amtr-k").unwrap().unwrap().session_id,
+            "giver"
+        );
     }
 
     #[test]
@@ -442,6 +567,63 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_synthesize_does_not_discard_an_older_undelivered_snapshot() {
+        // The case that made this necessary: a compaction with nothing new in
+        // it used to delete the previous compaction's `ready`. The row stayed
+        // on disk and no reader ever came back for it, so a perfectly good
+        // handoff was destroyed by a compaction that did no work at all.
+        let s = scratch();
+        s.save(&row("a", Some("amtr-k"), "earlier snapshot"))
+            .unwrap();
+        s.mark_ready("a").unwrap();
+
+        s.withdraw_own_claim("a").unwrap();
+
+        assert_eq!(
+            s.marker_state("a").as_deref(),
+            Some("ready"),
+            "an undelivered snapshot is not this run's to withdraw"
+        );
+        assert_eq!(s.load("a").unwrap().unwrap().handoff, "earlier snapshot");
+    }
+
+    #[test]
+    fn a_failed_synthesize_does_withdraw_its_own_claim() {
+        let s = scratch();
+        s.mark_ongoing("a").unwrap();
+        s.withdraw_own_claim("a").unwrap();
+        assert_eq!(
+            s.marker_state("a"),
+            None,
+            "leaving `ongoing` would make every later turn sit through the poll"
+        );
+    }
+
+    #[test]
+    fn an_empty_prompt_file_falls_back_rather_than_running_uninstructed() {
+        let s = scratch();
+        fs::write(s.prompt_path(), "   \n\n  ").unwrap();
+        assert_eq!(s.extraction_prompt("BUILT-IN"), "BUILT-IN");
+    }
+
+    #[test]
+    fn a_corrupt_row_is_an_error_not_a_silent_first_compaction() {
+        let s = scratch();
+        s.save(&row("a", Some("amtr-k"), "state")).unwrap();
+        fs::write(s.base().join(CORTEX).join("a.json"), "{ truncated").unwrap();
+
+        assert!(
+            s.load("a").is_err(),
+            "reporting this as absent would re-summarize the whole journal and \
+             drop everything carried so far"
+        );
+        assert!(
+            s.load("nobody").unwrap().is_none(),
+            "genuinely absent is still Ok(None)"
+        );
+    }
+
+    #[test]
     fn a_late_worker_re_owes_after_a_timed_out_reader_gave_up() {
         let s = scratch();
         s.mark_ongoing("a").unwrap();
@@ -477,12 +659,22 @@ mod tests {
     /// path the writer never wrote, and the memory silently stops arriving with
     /// nothing anywhere reporting a failure.
     ///
-    /// Runs the shell implementation verbatim rather than restating it, so the
-    /// test fails if either side drifts.
+    /// Executes the lines lifted out of the real hook script, so editing the
+    /// script's rule without editing this one fails the build or the test.
+    /// Restating the rule here would drift in exactly the way it is meant to
+    /// catch.
     #[test]
     fn the_shell_reader_derives_the_same_filename_as_the_writer() {
-        // The ids the two implementations actually disagreed about before the
-        // shell side learned to trim dots, plus the ordinary UUID case.
+        // Compile-time: moving or renaming the hook stops the build rather than
+        // quietly leaving this test asserting against nothing.
+        const HOOK: &str = include_str!("../plugin/tools/amtr-hook.sh");
+
+        let derivation = extract_slug_derivation(HOOK);
+
+        // Deliberately includes ids the hook's own character-class gate would
+        // reject. Testing only ids that pass the gate would make this assert
+        // something weaker than its name claims, and would leave the agreement
+        // resting on that gate rather than on the two rules matching.
         let ids = [
             "019fb5b0-b8d6-7432-a1ae-d03d37b6b32a",
             "..",
@@ -491,16 +683,21 @@ mod tests {
             "...",
             "a.b_c-d",
             ".",
+            // Never reaches the derivation at runtime; included so the rules
+            // agree on their own terms rather than by someone else's guard.
+            "../../etc/passwd",
+            "a/b",
+            "a b",
+            "a;rm -rf /",
+            "//",
+            "$(whoami)",
         ];
 
         for id in ids {
+            let program = format!("session_id=\"$1\"\n{derivation}\nprintf '%s' \"$slug\"");
             let out = std::process::Command::new("sh")
                 .arg("-c")
-                .arg(
-                    r#"slug=$(printf '%s' "$1" | sed 's/^\.*//; s/\.*$//')
-                       [ -n "$slug" ] || slug=_
-                       printf '%s' "$slug""#,
-                )
+                .arg(&program)
                 .arg("sh")
                 .arg(id)
                 .output()
@@ -512,6 +709,33 @@ mod tests {
                 "writer and reader disagree on the filename for {id:?}"
             );
         }
+    }
+
+    /// Lifts the two lines that derive `slug` out of the hook script.
+    ///
+    /// Panics rather than returning nothing when they cannot be found: a test
+    /// that quietly stopped exercising the real rule would restore exactly the
+    /// blind spot it exists to remove.
+    fn extract_slug_derivation(script: &str) -> String {
+        let lines: Vec<&str> = script
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("slug=") || l.starts_with("[ -n \"$slug\" ]"))
+            .collect();
+
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected the assignment and its empty-string fallback in \
+             plugin/tools/amtr-hook.sh, found {lines:?} — if the rule moved, \
+             point this extractor at its new shape"
+        );
+        assert!(
+            lines[0].contains("sed"),
+            "the slug assignment no longer uses sed: {:?}",
+            lines[0]
+        );
+        lines.join("\n")
     }
 
     #[test]

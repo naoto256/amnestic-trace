@@ -13,6 +13,46 @@ use crate::journal::Host;
 /// customization is editing that file in place.
 pub const DEFAULT_PROMPT: &str = include_str!("default-prompt.md");
 
+/// Why a synthesize produced no new snapshot.
+///
+/// These were one type for a long time, and flattening them cost real
+/// correctness: the caller could not tell "there was nothing to do" from "the
+/// agent is broken", so it treated both as a failure and discarded a perfectly
+/// good undelivered snapshot from the *previous* compaction. What the caller
+/// does with the marker depends entirely on which of these happened.
+#[derive(Debug)]
+pub enum Failed {
+    /// Nothing new in the journal. Not a failure — there was no work.
+    Vacuous,
+    /// Could not run to completion this time; the same window may well work at
+    /// the next attempt.
+    Transient(String),
+    /// The agent ran and failed. Retrying this window will fail the same way.
+    Permanent(String),
+    /// The agent produced something, and it is not fit to become memory.
+    Rejected(String),
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failed::Vacuous => write!(f, "nothing new since the previous compaction"),
+            Failed::Transient(m) => write!(f, "temporarily could not extract: {m}"),
+            Failed::Permanent(m) => write!(f, "extraction failed: {m}"),
+            Failed::Rejected(m) => write!(f, "extraction output rejected: {m}"),
+        }
+    }
+}
+
+impl From<io::Error> for Failed {
+    /// An unclassified I/O error is treated as transient. Being wrong that way
+    /// leaves a marker to retry against; being wrong the other way throws a
+    /// snapshot away.
+    fn from(e: io::Error) -> Self {
+        Failed::Transient(e.to_string())
+    }
+}
+
 /// A handoff longer than this is a runaway, not a summary of working memory.
 const MAX_HANDOFF_BYTES: usize = 64 * 1024;
 const MIN_HANDOFF_CHARS: usize = 20;
@@ -40,15 +80,28 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 /// Launches the CLI that produced this journal, since that is the one known to
 /// be installed and authenticated in this environment.
 ///
-/// The agent is given no tools. Summarizing a transcript needs none, and the
-/// journal it summarizes is full of text written by whatever the session was
-/// working on — an extraction agent that could run commands would turn that
-/// text into an execution path.
+/// Summarizing a transcript needs no tools, and the journal being summarized is
+/// full of text written by whatever the session was working on — so an agent
+/// that can run commands turns that text into an execution path.
 ///
-/// `workdir` is the store's own directory rather than the project the session
-/// was working in, so a tool that did somehow run would not start out pointed
-/// at the user's source tree.
-pub fn run(host: Host, input: &str, workdir: &Path) -> io::Result<String> {
+/// How completely that is achieved differs by host, and the difference is worth
+/// stating plainly rather than papering over:
+///
+/// - **Claude Code**: `--tools ""` makes the built-in tools unavailable, and
+///   `--strict-mcp-config` with no config supplied leaves no MCP servers. This
+///   was previously `--allowedTools ""`, which is a *pre-approval* list rather
+///   than an availability list — under it the agent ran Bash and read files
+///   perfectly happily, while the comment here claimed it had no tools.
+/// - **Codex**: `--sandbox read-only` stops writes. It does *not* remove the
+///   shell, and it does not confine reads to `workdir`. Codex exposes no
+///   equivalent of "no tools", so on that host an extraction agent that is
+///   successfully steered by journal content can still read files the user can
+///   read. `workdir` limits where it starts, not where it can reach.
+///
+/// `workdir` is an empty scratch directory in both cases, so nothing of this
+/// tool's own — other sessions' handoffs, their keys, the prompt — is sitting
+/// in reach of whatever does run.
+pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
     let mut cmd = match host {
         Host::Claude => {
             let mut c = Command::new("claude");
@@ -56,8 +109,10 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> io::Result<String> {
                 "-p",
                 "--output-format",
                 "text",
-                // Empty allowlist: no tool is permitted.
-                "--allowed-tools",
+                // Availability, not pre-approval. `--allowedTools ""` looks
+                // like it does this and does not: it approves nothing in
+                // advance while leaving every tool present and callable.
+                "--tools",
                 "",
                 // Ignore every configured MCP server. None is passed, so this
                 // leaves the agent with none.
@@ -87,7 +142,10 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> io::Result<String> {
         // Inherited so the agent's own diagnostics land in the worker's log
         // rather than vanishing.
         .stderr(Stdio::inherit())
-        .spawn()?;
+        .spawn()
+        // Not installed, not on PATH, not executable: nothing about this window
+        // is wrong, so the marker should survive for a later attempt.
+        .map_err(|e| Failed::Transient(format!("could not start the extraction agent: {e}")))?;
 
     // Both pipes are serviced off-thread. The input is larger than a pipe
     // buffer and the output can be too, so writing and reading inline would
@@ -116,7 +174,7 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> io::Result<String> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(io::Error::other("extraction agent timed out"));
+            return Err(Failed::Transient("extraction agent timed out".into()));
         }
         std::thread::sleep(Duration::from_millis(200));
     };
@@ -126,14 +184,17 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> io::Result<String> {
     let _ = writer.join();
     let stdout = reader
         .join()
-        .map_err(|_| io::Error::other("output reader panicked"))??;
+        .map_err(|_| Failed::Transient("output reader panicked".into()))?
+        .map_err(|e| Failed::Transient(format!("could not read the agent's output: {e}")))?;
 
     if !status.success() {
-        return Err(io::Error::other(format!(
+        // The agent ran and decided it could not do this. Feeding it the same
+        // window again will reach the same place.
+        return Err(Failed::Permanent(format!(
             "extraction agent exited with {status}"
         )));
     }
-    validate(&strip_preamble(&String::from_utf8_lossy(&stdout)))
+    validate(&strip_preamble(&String::from_utf8_lossy(&stdout))).map_err(Failed::Rejected)
 }
 
 /// Drops anything before the first `##` heading.
@@ -161,15 +222,13 @@ fn strip_preamble(raw: &str) -> String {
 }
 
 /// The only gate between a flaky agent run and overwriting working memory.
-pub fn validate(raw: &str) -> io::Result<String> {
+pub fn validate(raw: &str) -> Result<String, String> {
     let text = raw.trim();
     if text.chars().count() < MIN_HANDOFF_CHARS {
-        return Err(io::Error::other("extraction produced no usable handoff"));
+        return Err("produced no usable handoff".into());
     }
     if text.len() > MAX_HANDOFF_BYTES {
-        return Err(io::Error::other(
-            "extraction output exceeds the handoff budget",
-        ));
+        return Err("exceeds the handoff budget".into());
     }
     Ok(text.to_string())
 }
