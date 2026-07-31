@@ -14,14 +14,20 @@ set -u
 event=${1:-}
 input=$(cat)
 
-# Minimal JSON string field read. The hook payloads are flat, and depending on
-# jq or python3 being installed would make the hook fail where AMT does not.
+# `set -u` would abort on an unset HOME, and this must never be the reason a
+# turn fails.
+home=${HOME:-}
+[ -n "$home" ] || exit 0
+
+# Minimal JSON string field read. The payloads are flat, and depending on jq or
+# python3 being installed would make the hook fail where the binary does not.
 #
-# `grep -o` takes the FIRST occurrence rather than sed's greedy `.*` prefix,
-# which would take the last. That matters: the user's own prompt text is in
-# this payload, so a prompt containing `"session_id":"<other>"` could otherwise
-# redirect the lookup and inject a different session's memory. The host's real
-# fields precede the prompt in the payload.
+# This takes the FIRST match rather than the last. The reason is not field
+# order — nothing guarantees that. It is that a JSON string cannot contain a raw
+# `"`, so the user's prompt text, which travels in this same payload, can only
+# ever contain an ESCAPED `\"session_id\": \"...\"`. The pattern requires an
+# unescaped opening quote, so a prompt cannot forge a match that outranks the
+# host's own field.
 field() {
 	printf '%s' "$input" |
 		grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" |
@@ -32,20 +38,35 @@ field() {
 session_id=$(field session_id)
 [ -n "$session_id" ] || exit 0
 
+# Everything downstream interpolates this into a path and into a `find` pattern.
+# Both hosts mint UUIDs, so anything outside this set is not a session id we
+# recognise, and guessing at its intent is worse than doing nothing.
+case "$session_id" in
+*[!A-Za-z0-9._-]*) exit 0 ;;
+esac
+
 # Same two-way branch the binary uses, and for the same reason: a hook has no
-# guaranteed shell environment, so the layout must not depend on one.
-if [ -d "$HOME/.local" ]; then
-	amtr_home="$HOME/.local/share/amtr"
+# guaranteed shell environment, so the layout must not depend on a tunable.
+if [ -d "$home/.local" ]; then
+	amtr_home="$home/.local/share/amtr"
 else
-	amtr_home="$HOME/.amtr"
+	amtr_home="$home/.amtr"
 fi
-slug=$(printf '%s' "$session_id" | tr -c 'A-Za-z0-9._-' '_')
+
+# Must match `slug()` in src/store.rs exactly, or the reader looks for a marker
+# at a path the writer never wrote. The character class is already guaranteed by
+# the validation above; what remains is the binary's leading/trailing dot trim
+# and its empty-string fallback. CI cross-checks the two implementations.
+slug=$(printf '%s' "$session_id" | sed 's/^\.*//; s/\.*$//')
+[ -n "$slug" ] || slug=_
 marker="$amtr_home/prefrontal-cortex/$slug.marker"
 
-# Hook execution inherits a minimal PATH that omits the directories cargo and
-# the usual installers write to, so `command -v` would miss an installed binary
-# and this script would silently do nothing.
-PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+# Hook execution inherits a minimal PATH that omits where cargo and the usual
+# installers write, so `command -v` would otherwise miss an installed binary and
+# this script would silently do nothing. Appended rather than prepended: this
+# process goes on to run stock utilities, and a hook has no business shadowing
+# the system's copies of them.
+PATH="$PATH:$home/.local/bin:$home/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"
 export PATH
 
 command -v amtr >/dev/null 2>&1 || exit 0
@@ -58,8 +79,9 @@ precompact)
 		# DESIGN-QUESTION: Codex's PreCompact payload is not documented. Its
 		# binary carries the string `rollout_path` (not `transcript_path`), but
 		# whether PreCompact actually delivers it is unverified, so this falls
-		# back to the rollout filename, which embeds the session id.
-		journal=$(find "$HOME/.codex/sessions" -name "*$session_id*.jsonl" 2>/dev/null | head -1)
+		# back to the rollout filename, which embeds the session id. The id is
+		# validated above, so it holds no `find` glob metacharacters.
+		journal=$(find "$home/.codex/sessions" -name "*$session_id*.jsonl" 2>/dev/null | head -1)
 	fi
 	[ -n "$journal" ] && [ -f "$journal" ] || exit 0
 	# Returns as soon as the worker has detached and the marker is on disk.
@@ -71,10 +93,10 @@ recall)
 	# every turn that does not follow a compaction.
 	[ -f "$marker" ] || exit 0
 
-	# DESIGN-QUESTION: the poll budget is 25s because the UserPromptSubmit hook
-	# default timeout is 30s, and the `timeout` key's unit (seconds or
-	# milliseconds) is documented inconsistently — so hooks.json declares none
-	# rather than risk a value that kills the hook instantly.
+	# The poll budget is 25s. hooks/claude.json declares a 35s timeout around
+	# it, leaving room for the read that follows; hooks/codex.json declares
+	# none, because the unit of that field is unverified on Codex and a wrong
+	# guess would kill the hook outright rather than fail visibly.
 	waited=0
 	while [ "$(cat "$marker" 2>/dev/null)" = "ongoing" ] && [ "$waited" -lt 25 ]; do
 		sleep 1
@@ -91,9 +113,16 @@ recall)
 	fi
 
 	# Deliver first, then discharge the debt, so a snapshot is never marked
-	# delivered on a turn that failed to inject it.
+	# delivered on a turn that failed to inject it. `amtr recall` exits 0 only
+	# when it actually printed a handoff — 1 means there was nothing to deliver
+	# or it failed, and either way the debt stands.
 	if amtr recall "$session_id" 2>/dev/null; then
-		rm -f "$marker"
+		# Re-read before discharging. A compaction can start while this turn is
+		# in flight, and that worker's fresh `ongoing` must not be deleted as
+		# though it were the snapshot just delivered.
+		if [ "$(cat "$marker" 2>/dev/null)" = "ready" ]; then
+			rm -f "$marker"
+		fi
 	fi
 	;;
 esac

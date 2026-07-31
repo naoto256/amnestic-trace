@@ -1,13 +1,18 @@
 //! One JSON row per session_id, plus markers. No database, no lock, no ledger.
 //!
-//! Base directory resolution is deliberately env-free: hooks are spawned by the
-//! host and are not guaranteed to inherit a shell environment, so a variable
-//! like XDG_DATA_HOME could resolve differently for the writer (a detached
-//! worker) and the reader (a hook), which would look like memory loss. The rule
-//! is a hardcoded two-way branch on the existence of `~/.local`.
+//! Base directory resolution takes no *configuration* from the environment.
+//! Hooks are spawned by the host with no guaranteed shell environment, so a
+//! tunable like XDG_DATA_HOME could resolve differently for the writer (a
+//! detached worker) and the reader (a hook), which would present as memory
+//! loss. The rule is a hardcoded two-way branch on the existence of `~/.local`.
+//!
+//! The home directory itself is unavoidably environmental: `home_dir()` reads
+//! `$HOME` and falls back to the passwd entry. Both halves resolve it the same
+//! way — the shell hook reads `$HOME` too — so they agree, which is the
+//! property that actually matters here.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -53,9 +58,22 @@ impl Store {
     }
 
     /// Opens (and creates) a store rooted at an explicit base. Tests use this.
+    ///
+    /// The tree is owner-only. What it holds is a verbatim distillation of a
+    /// working session — file paths, quoted decisions, sometimes the shape of
+    /// unreleased work — so it deserves the same treatment as a private key
+    /// rather than the default umask.
     pub fn at(base: PathBuf) -> io::Result<Store> {
         fs::create_dir_all(base.join(CORTEX))?;
+        restrict_dir(&base);
+        restrict_dir(&base.join(CORTEX));
         Ok(Store { base })
+    }
+
+    /// The store's own directory. The worker moves here after detaching so it
+    /// no longer stands in the project the session was working on.
+    pub fn base(&self) -> &Path {
+        &self.base
     }
 
     /// Editable in place; written once if absent and never overwritten.
@@ -84,15 +102,8 @@ impl Store {
 
     /// UPSERT. Temp file + atomic rename, so a reader never sees a torn row.
     pub fn save(&self, row: &Row) -> io::Result<()> {
-        let path = self.row_path(&row.session_id);
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
         let body = serde_json::to_vec_pretty(row).map_err(io::Error::other)?;
-        {
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(&body)?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, &path)
+        write_atomic(&self.row_path(&row.session_id), &body)
     }
 
     pub fn forget(&self, session_id: &str) -> io::Result<()> {
@@ -155,12 +166,13 @@ impl Store {
     /// to be injected. The reader deletes it once delivery succeeds, so a
     /// snapshot that lands while nobody is looking is still delivered at the
     /// next turn rather than lost.
+    /// Both transitions go through the same atomic write, so a reader polling
+    /// this path never observes a half-written state word: it either keeps
+    /// waiting or delivers, never both.
     pub fn mark_ongoing(&self, session_id: &str) -> io::Result<()> {
-        fs::write(self.marker_path(session_id), b"ongoing")
+        write_atomic(&self.marker_path(session_id), b"ongoing")
     }
 
-    /// Atomic rename: a reader polling this path never observes a half-written
-    /// state word, so it either keeps waiting or delivers, never both.
     pub fn mark_ready(&self, session_id: &str) -> io::Result<()> {
         write_atomic(&self.marker_path(session_id), b"ready")
     }
@@ -194,11 +206,36 @@ impl Store {
     }
 }
 
+/// Single writer for everything under the store. The temp file is created
+/// owner-only *before* any bytes reach it, so the contents are never briefly
+/// world-readable, and the rename carries those bits to the final name.
 fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&tmp, body)?;
+    {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(body)?;
+        f.sync_all()?;
+    }
     fs::rename(&tmp, path)
 }
+
+/// Best-effort: a store that exists but could not be tightened is still better
+/// than no memory at all, and the caller cannot act on the failure anyway.
+#[cfg(unix)]
+fn restrict_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn restrict_dir(_path: &Path) {}
 
 /// Session ids are host-minted UUIDs in practice; this only guards against a
 /// hostile or exotic id escaping the sessions directory.
@@ -228,12 +265,25 @@ pub fn now() -> String {
 }
 
 /// Volatile name of one snapshot. Milliseconds in base36 keep it short enough
-/// for a human to read back over voice and monotonic enough to eyeball order;
-/// the pid disambiguates two sessions compacting in the same millisecond,
-/// which would otherwise make `find_by_key` pick an arbitrary one.
+/// for a human to read back over voice and monotonic enough to eyeball order.
+///
+/// The random tail is the part that matters: the key is the only thing standing
+/// between another session and this session's memory, and a timestamp plus a
+/// pid is guessable by anyone who knows roughly when a compaction happened.
 pub fn mint_key() -> String {
     let ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    format!("amtr-{}-{}", base36(ms), base36(std::process::id() as u64))
+    format!("amtr-{}-{}", base36(ms), base36(random_u64()))
+}
+
+/// 64 bits from the OS. Falls back to the pid only if the kernel's generator is
+/// somehow unreadable, which keeps a key minting rather than failing the whole
+/// synthesize — a weak key still beats losing the snapshot.
+fn random_u64() -> u64 {
+    let mut bytes = [0u8; 8];
+    match fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)) {
+        Ok(()) => u64::from_le_bytes(bytes),
+        Err(_) => std::process::id() as u64,
+    }
 }
 
 fn base36(mut n: u64) -> String {
@@ -420,6 +470,48 @@ mod tests {
         assert!(!escaped.contains('/'), "no separator survives: {escaped}");
         assert!(!escaped.starts_with('.'), "cannot climb out: {escaped}");
         assert_eq!(slug(".."), "_");
+    }
+
+    /// The reader is the hook script, in shell, so this rule exists twice. They
+    /// are one contract: if they disagree, the reader looks for a marker at a
+    /// path the writer never wrote, and the memory silently stops arriving with
+    /// nothing anywhere reporting a failure.
+    ///
+    /// Runs the shell implementation verbatim rather than restating it, so the
+    /// test fails if either side drifts.
+    #[test]
+    fn the_shell_reader_derives_the_same_filename_as_the_writer() {
+        // The ids the two implementations actually disagreed about before the
+        // shell side learned to trim dots, plus the ordinary UUID case.
+        let ids = [
+            "019fb5b0-b8d6-7432-a1ae-d03d37b6b32a",
+            "..",
+            ".leading",
+            "trailing.",
+            "...",
+            "a.b_c-d",
+            ".",
+        ];
+
+        for id in ids {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(
+                    r#"slug=$(printf '%s' "$1" | sed 's/^\.*//; s/\.*$//')
+                       [ -n "$slug" ] || slug=_
+                       printf '%s' "$slug""#,
+                )
+                .arg("sh")
+                .arg(id)
+                .output()
+                .expect("sh is available");
+            let from_shell = String::from_utf8_lossy(&out.stdout).to_string();
+            assert_eq!(
+                slug(id),
+                from_shell,
+                "writer and reader disagree on the filename for {id:?}"
+            );
+        }
     }
 
     #[test]
