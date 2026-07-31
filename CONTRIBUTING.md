@@ -7,11 +7,13 @@ Pull requests are not accepted at this time.
 ## Working on it locally
 
 ```sh
+cargo fmt --all -- --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Both must pass. Tests cover the pure logic — window slicing, the storage
+All three must pass; CI runs the same three, plus a syntax check on the hook
+script and consistency checks over the plugin manifests. Tests cover the pure logic — window slicing, the storage
 transitions, output validation. The process-level behavior (double fork, hook
 wiring, injection) is not unit-testable in any meaningful way; `README.md`
 carries the manual procedure for it, and changes to that layer should be

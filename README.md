@@ -1,5 +1,8 @@
 # Amnestic Trace (amtr)
 
+[![CI](https://github.com/naoto256/amnestic-trace/actions/workflows/ci.yml/badge.svg)](https://github.com/naoto256/amnestic-trace/actions/workflows/ci.yml)
+[![Release](https://github.com/naoto256/amnestic-trace/actions/workflows/release.yml/badge.svg)](https://github.com/naoto256/amnestic-trace/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/naoto256/amnestic-trace?sort=semver&display_name=tag)](https://github.com/naoto256/amnestic-trace/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A one-to-one replacement of short-term working memory across a context
