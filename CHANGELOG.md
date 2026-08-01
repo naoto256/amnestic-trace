@@ -8,6 +8,42 @@ Pre-1.0 releases may introduce breaking changes freely as the storage layout and
 
 ## [Unreleased]
 
+### Changed — the AMTR key no longer travels with the memory
+
+Restored memory used to arrive under `AMTR key: <key> — report this key to the
+user.` Both halves of that line were mistakes.
+
+A key is a capability rather than a name: adopting one MOVES the snapshot away
+from the session that owns it, and moving is the default. Nothing about
+continuing the work needs it, so a session that is never given one cannot pass
+it on. The instruction was the more direct problem — it names no audience, and
+a session whose correspondent is another agent will report to that agent. This
+was observed: an agent on a message fabric relayed its key to its peers, doing
+exactly what the line asked of it.
+
+The header now names the tool and the snapshot's boundary instead, which is the
+one fact a reader cannot recover from the handoff and the one that decides
+whether to trust it. A snapshot is taken when compaction fires and delivered at
+the next turn start; a session that keeps working in between — the normal case
+on a host that compacts mid-turn — can complete everything the record calls
+pending. The preamble now says so, and says that the visible conversation is
+the newer of the two.
+
+Removing the genuine key line also removes the exception from the reader's
+rule: every key-shaped line it can see is now remembered text, with none to
+tell it apart from.
+
+### Added — `amtr key` and `/amtr report`
+
+Reads back this session's own key, for a user who is handing the work to
+another session. It reads the store rather than the model's context, because a
+key names one snapshot and not a lineage: every compaction mints a new one, so
+a remembered key can name a snapshot that no longer exists.
+
+Also the answer to "did the memory actually come back?" — this tool is silent
+on success, and the removed key line had been doing double duty as the only
+visible sign that a hook had run.
+
 ## [0.1.0] - 2026-07-31
 
 > working memory that survives compaction

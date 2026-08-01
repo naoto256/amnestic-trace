@@ -18,7 +18,15 @@ amtr synthesize <session_id> <journal_path>   # PreCompact: detach and extract
 amtr recall <session_id>                      # pure read
 amtr recall <session_id> --amtr-key <key>      # cross-session handoff (MOVE)
 amtr recall <session_id> --amtr-key <key> --clone
+amtr key <session_id>                         # this session's own key
 ```
+
+A key is a capability, not a name: whoever holds it can move a snapshot away
+from the session that owns it, and moving is the default. So none is placed in
+the injected memory — nothing about continuing the work needs one, and a
+session wired into a channel of other agents cannot pass on what it was never
+given. `amtr key` reads it back when a handoff is actually wanted, from the
+store rather than from whatever a model remembers.
 
 `synthesize` writes a marker, detaches by double fork, and returns, so
 extraction runs in parallel with compaction itself.
@@ -186,9 +194,14 @@ minutes later.
 
 **3. Hook injection.** In a real session, force a compaction (`/compact`), wait
 until the marker reads `ready:<key>`, then send a prompt — deliberately after a
-pause, since that is the ordinary case. The handoff should appear in context,
-the assistant should report the AMTR key, and the marker should be gone
-afterwards. Run Claude Code with `--debug hooks` to see the hook fire.
+pause, since that is the ordinary case. The handoff should appear in context
+under a line naming the snapshot's boundary, no key should appear anywhere in
+it, and the marker should be gone afterwards. Run Claude Code with
+`--debug hooks` to see the hook fire.
+
+Ask the assistant whether its memory was restored, and it should be able to
+answer from that line — the tool is otherwise silent, so this is what makes a
+working injection distinguishable from a hook that never ran.
 
 **4. Fail-open on timeout.** Write `ongoing` to a marker by hand for a live
 session and send a prompt. The turn must proceed normally after ~25s with
@@ -207,7 +220,9 @@ Do not dump the hook's stdin to a file to check this. That payload carries the
 user's prompt text, and a predictable path under `/tmp` is a poor place to put
 it. If you must capture it, use `umask 077` and `mktemp`, and delete it after.
 
-**6. Handoff.** In session B, run `/amtr <key from session A>`. B should receive
+**6. Handoff.** In session A, run `/amtr report` to obtain its key — it is not
+in A's context, so this is the only way to get it. Then in session B, run
+`/amtr <that key>`. B should receive
 A's memory; A's row must be gone (`ls` the cortex directory). With `clone`, A's
 row must survive and B's must have `"amtr_key": null`.
 
