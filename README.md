@@ -85,8 +85,16 @@ move the store away from them.
     <session_id>.marker            # ongoing | ready:<amtr_key>
 ```
 
-The tree is created `0700` and every file in it `0600`. It holds a distillation
-of a working session, which deserves the same handling as a private key.
+The tree is created `0700` and every file in it `0600` — not because a handoff
+is a secret, but because the store is where every session's handoff ends up at
+once, and that is not something to leave to the ambient umask.
+
+It is not protection in any stronger sense. A handoff is derived from a journal
+the host already wrote to disk, and on Codex that journal is world-readable, so
+anyone who can read a row can read more by reading its source. Injected memory
+is written back into the journal too, and hook output over the host's size
+limit is spilled to a file under the system temp directory. Nothing here
+reaches any of those.
 
 When memory stops arriving, `amtr.log` is the place to look — everything the
 worker does happens after it has detached from any terminal, so this is the only

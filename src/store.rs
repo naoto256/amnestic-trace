@@ -76,10 +76,12 @@ impl Store {
 
     /// Opens (and creates) a store rooted at an explicit base. Tests use this.
     ///
-    /// The tree is owner-only. What it holds is a verbatim distillation of a
-    /// working session — file paths, quoted decisions, sometimes the shape of
-    /// unreleased work — so it deserves the same treatment as a private key
-    /// rather than the default umask.
+    /// The tree is owner-only because it is where every session's handoff ends
+    /// up at once, which is worth more than the ambient umask decides on the
+    /// day. Not because a handoff is a secret: it is derived from a journal the
+    /// host already wrote, and on one of the two hosts that journal is
+    /// world-readable, so this protects nothing that is not more freely
+    /// readable elsewhere.
     pub fn at(base: PathBuf) -> io::Result<Store> {
         // Created 0700 in the first place where the platform allows it, rather
         // than created then tightened — the latter leaves a brief window at the
