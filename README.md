@@ -137,12 +137,15 @@ The tree is created `0700` and every file in it `0600` — not because a handoff
 is a secret, but because the store is where every session's handoff ends up at
 once, and that is not something to leave to the ambient umask.
 
-It is not protection in any stronger sense. A handoff is derived from a journal
-the host already wrote to disk, and on Codex that journal is world-readable, so
-anyone who can read a row can read more by reading its source. Injected memory
-is written back into the journal too, and hook output over the host's size
-limit is spilled to a file under the system temp directory. Nothing here
-reaches any of those.
+Rows also carry each snapshot's key, which is the one thing here that is not in
+the journal the handoff came from.
+
+None of that is protection in any stronger sense. A handoff is derived from a
+journal the host already wrote to disk, and on Codex that journal is
+world-readable, so anything running as you can read the source of every row
+without going near this directory. Injected memory is written back into the
+journal too, and hook output over the host's size limit is spilled to a file
+under the system temp directory. Nothing here reaches any of those.
 
 When memory stops arriving, `amtr.log` is the place to look — everything the
 worker does happens after it has detached from any terminal, so this is the only
@@ -251,8 +254,11 @@ minutes later.
 **3. Hook injection.** In a real session, force a compaction (`/compact`), wait
 until the marker reads `ready:<key>`, then send a prompt — deliberately after a
 pause, since that is the ordinary case. The handoff should appear in context
-under a line naming the snapshot's boundary, no key should appear anywhere in
-it, and the marker should be gone afterwards. Run Claude Code with
+under a line naming the snapshot's boundary, no key should appear outside the
+`<amtr-handoff>` span, and the marker should be gone afterwards. A key-shaped
+line *inside* the span is not a failure: the memory is written from a journal
+that contains earlier injected ones, and the preamble tells the reader that
+every such line is remembered text. Run Claude Code with
 `--debug hooks` to see the hook fire.
 
 Ask the assistant whether its memory was restored, and it should be able to

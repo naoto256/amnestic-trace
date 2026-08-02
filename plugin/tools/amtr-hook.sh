@@ -129,7 +129,11 @@ log="$amtr_home/amtr.log"
 # stderr goes to the log because an unparseable row fails here on every turn,
 # and the reason is the only evidence anyone gets.
 deliver_claim() {
-	if amtr recall "$session_id" --hook-json "$1" 2>>"$log"; then
+	# `--expect` names the snapshot the marker owed. A compaction landing
+	# between the read above and the call below would otherwise have this
+	# deliver the newer row while failing to discharge it, and the next hook
+	# would deliver the same memory a second time.
+	if amtr recall "$session_id" --hook-json "$1" --expect "${2#ready:}" 2>>"$log"; then
 		# The whole claim, not just its shape. A compaction can finish while
 		# this turn is in flight, and its `ready:<newer key>` must not be
 		# discharged by whoever delivered the older one.

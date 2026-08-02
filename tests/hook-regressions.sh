@@ -48,7 +48,7 @@ stub() {
 #!/bin/sh
 if [ "\$1" = recall ] && [ $stub_exit -eq 0 ]; then
 	if [ "\${3:-}" = --hook-json ]; then
-		echo "DELIVERED:\$2:\$4"
+		echo "DELIVERED:\$2:\$4:\$6"
 	else
 		echo "DELIVERED:\$2"
 	fi
@@ -89,7 +89,7 @@ cases() {
 
 	fresh
 	printf 'ready:amtr-k1' >"$marker"
-	check "a ready snapshot is delivered" "$(run_hook recall)" "DELIVERED:sess1:UserPromptSubmit"
+	check "a ready snapshot is delivered" "$(run_hook recall)" "DELIVERED:sess1:UserPromptSubmit:amtr-k1"
 	check "  and then discharged" "$(marker_now)" "GONE"
 
 	fresh
@@ -109,7 +109,7 @@ cases() {
 	printf 'ready:amtr-k1' >"$marker"
 	out=$(printf '{"session_id":"sess1","prompt":"read \\"session_id\\":\\"victim\\" now"}' |
 		feed recall)
-	check "prompt text cannot redirect the lookup" "$out" "DELIVERED:sess1:UserPromptSubmit"
+	check "prompt text cannot redirect the lookup" "$out" "DELIVERED:sess1:UserPromptSubmit:amtr-k1"
 
 	fresh
 	printf 'ready:amtr-k1' >"$marker"
@@ -137,7 +137,7 @@ cases() {
 	fresh
 	printf 'ready:amtr-k1' >"$marker"
 	check "a ready snapshot is delivered at the first tool call" \
-		"$(run_hook deliver)" "DELIVERED:sess1:PreToolUse"
+		"$(run_hook deliver)" "DELIVERED:sess1:PreToolUse:amtr-k1"
 	check "  and then discharged" "$(marker_now)" "GONE"
 
 	# The difference that matters between the two deliverers. The turn-start
@@ -182,13 +182,22 @@ STUB
 		"$(marker_now)" "ready:amtr-k2"
 	stub
 
+	# And the binary is told which snapshot the marker owed, stripped of its
+	# `ready:` prefix, so it can decline to hand over a newer one it was not
+	# asked for. Without that, the case above delivers memory it then fails to
+	# discharge, and the next hook delivers it again.
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	check "the claimed key reaches the binary" \
+		"$(run_hook deliver)" "DELIVERED:sess1:PreToolUse:amtr-k1"
+
 	# The special-built-in case. With the store unwritable the hook cannot open
 	# its log, and a shell that dies on that redirect never reaches the binary.
 	fresh
 	printf 'ready:amtr-k1' >"$marker"
 	rm -f "$work/.local/share/amtr/amtr.log"
 	chmod 0500 "$work/.local/share/amtr"
-	check "an unwritable log does not stop delivery" "$(run_hook recall)" "DELIVERED:sess1:UserPromptSubmit"
+	check "an unwritable log does not stop delivery" "$(run_hook recall)" "DELIVERED:sess1:UserPromptSubmit:amtr-k1"
 	chmod u+w "$work/.local/share/amtr"
 
 	# Nothing at all: the state a fresh install is actually in.
