@@ -77,7 +77,7 @@ Removing the genuine key line also removes the exception from the reader's
 rule: every key-shaped line it can see is now remembered text, with none to
 tell it apart from.
 
-### Added — `amtr key` and `/amtr report`
+### Added — `amtr key`, and a bare `/amtr` that names this session's snapshot
 
 Reads back this session's own key, for a user who is handing the work to
 another session. It reads the store rather than the model's context, because a
@@ -87,6 +87,12 @@ a remembered key can name a snapshot that no longer exists.
 Also the answer to "did the memory actually come back?" — this tool is silent
 on success, and the removed key line had been doing double duty as the only
 visible sign that a hook had run.
+
+The skill spells it `/amtr` with nothing after it, which is the same command the
+receiving end runs with a key. Holding a key or not is the entire difference
+between the two ends of a handoff, so it needs no word of its own — and a verb
+like `transfer` would have overstated it, since this end cannot move anything.
+Only the receiving session can write its own row.
 
 ## [0.1.0] - 2026-07-31
 
