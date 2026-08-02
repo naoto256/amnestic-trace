@@ -84,9 +84,9 @@ another session. It reads the store rather than the model's context, because a
 key names one snapshot and not a lineage: every compaction mints a new one, so
 a remembered key can name a snapshot that no longer exists.
 
-Also the answer to "did the memory actually come back?" — this tool is silent
-on success, and the removed key line had been doing double duty as the only
-visible sign that a hook had run.
+Also the answer to "did the memory actually come back?" — the restoring hooks
+say nothing when they work, and the removed key line had been doing double duty
+as the only visible sign that one had run.
 
 The skill spells it `/amtr` with nothing after it, which is the same command the
 receiving end runs with a key. Holding a key or not is the entire difference

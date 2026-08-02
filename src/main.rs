@@ -23,7 +23,7 @@ use store::{Row, Store};
 
 const USAGE: &str = "usage:
   amtr synthesize <session_id> <journal_path>
-  amtr recall <session_id> [--hook-json <event>]
+  amtr recall <session_id> [--hook-json <event>] [--expect <key>]
   amtr recall <session_id> --amtr-key <key> [--clone]
   amtr key <session_id>
   amtr default-prompt";
@@ -49,8 +49,13 @@ fn main() -> ExitCode {
 
     let outcome = match argv.as_slice() {
         ["synthesize", session_id, journal] => synthesize(session_id, Path::new(journal)),
-        ["recall", session_id] => recall(session_id, Shape::Bare),
-        ["recall", session_id, "--hook-json", event] => recall(session_id, Shape::HookJson(event)),
+        ["recall", session_id] => recall(session_id, Shape::Bare, None),
+        ["recall", session_id, "--hook-json", event] => {
+            recall(session_id, Shape::HookJson(event), None)
+        }
+        ["recall", session_id, "--hook-json", event, "--expect", key] => {
+            recall(session_id, Shape::HookJson(event), Some(key))
+        }
         ["recall", session_id, "--amtr-key", key] => adopt(session_id, key, false),
         ["recall", session_id, "--amtr-key", key, "--clone"] => adopt(session_id, key, true),
         ["key", session_id] => report_key(session_id),
@@ -245,10 +250,26 @@ enum Shape<'a> {
     HookJson(&'a str),
 }
 
+/// Whether the row on disk is the snapshot the caller meant to deliver.
+///
+/// A hook reads the marker, then calls this — and a compaction can land in
+/// between, replacing the row. Delivering the newer one is not wrong in itself,
+/// but the hook would then fail to discharge a debt it had just paid, and the
+/// next hook would deliver the same memory again.
+fn is_the_expected_snapshot(row_key: Option<&str>, expected: Option<&str>) -> bool {
+    match expected {
+        None => true,
+        Some(want) => row_key == Some(want),
+    }
+}
+
 /// Pure read. Nothing is written, so a recall can be repeated freely.
-fn recall(session_id: &str, shape: Shape) -> io::Result<Status> {
+fn recall(session_id: &str, shape: Shape, expected: Option<&str>) -> io::Result<Status> {
     let store = Store::open()?;
     match store.load(session_id) {
+        Ok(Some(row)) if !is_the_expected_snapshot(row.amtr_key.as_deref(), expected) => {
+            Ok(Status::Nothing)
+        }
         Ok(Some(row)) => {
             match shape {
                 Shape::Bare => print!("{}", render(&row)),
@@ -474,6 +495,22 @@ mod tests {
         assert!(!names_no_session(&["key", "019efc46-72c1-7aa2"]));
         // Takes no session, so it has none to be empty.
         assert!(!names_no_session(&["default-prompt"]));
+    }
+
+    #[test]
+    fn a_delivery_hands_over_the_snapshot_it_was_asked_for() {
+        // The hook reads `ready:<key>` and calls in; a compaction can replace
+        // the row in between. Handing over the newer one is not wrong, but the
+        // hook would then discharge nothing and the next one would deliver the
+        // same memory again.
+        assert!(is_the_expected_snapshot(Some("amtr-k1"), Some("amtr-k1")));
+        assert!(!is_the_expected_snapshot(Some("amtr-k2"), Some("amtr-k1")));
+        // A clone has no key of its own, so it is never what a marker claimed.
+        assert!(!is_the_expected_snapshot(None, Some("amtr-k1")));
+        // No claim named: every caller but the hooks, which want the row as it
+        // stands.
+        assert!(is_the_expected_snapshot(Some("amtr-k1"), None));
+        assert!(is_the_expected_snapshot(None, None));
     }
 
     #[test]
