@@ -8,6 +8,50 @@ Pre-1.0 releases may introduce breaking changes freely as the storage layout and
 
 ## [Unreleased]
 
+### Added — the memory is delivered at the first tool call, not the next prompt
+
+A compaction fires mid-turn and no host can inject from a compaction hook, so
+delivery waited for `UserPromptSubmit` — that is, for the user to speak again. A
+session left working in the meantime finishes things the snapshot still calls
+pending, and the memory lands describing the state before them. Thirty minutes
+of work was observed in that gap, an implementation, its tests and its
+deployment all completed after the snapshot was written and absent from it.
+
+A `PreToolUse` hook now delivers during that stretch instead. The turn-start
+hook stays as the backstop for turns that call no tools, and the marker decides
+which of them gets there first, so neither injects the same memory twice.
+
+The two behave differently when the snapshot is not ready. The turn-start hook
+has someone waiting on it: it polls, then gives up for good. The tool-call hook
+is only ever early — it leaves the debt standing and does not poll, because
+stalling every tool call in a turn costs more than the memory is worth.
+
+`amtr recall --hook-json <event>` shapes the output as `additionalContext` for
+the named event. `PreToolUse` ignores plain stdout, so a hook that printed there
+would discharge the marker and deliver nothing. The binary builds the JSON
+because a handoff is machine-written prose full of quotes, backslashes and
+newlines, and a shell assembling JSON around that is one unescaped byte from
+delivering nothing at all.
+
+### Changed — the handoff budget is measured in tokens against what a host will deliver
+
+Hosts cap the model-visible part of a hook's output and spill the rest to a
+file, giving the model a head-and-tail preview and a path. Oversized memory does
+not arrive short: it arrives with its middle replaced, still shaped like a
+handoff, and recovering it takes a tool call nothing obliges the model to make.
+The spilled file is world-readable under the system temp directory.
+
+Measured on Codex: 9,129 characters of ASCII arrived whole and 11,128 spilled,
+matching the ~2,500 tokens per message that host documents. `validate` now
+rejects a handoff estimated over 2,000 tokens instead of the old 64KB, which
+bore no relation to anything. The estimate is deliberately crude — CJK at a
+token per character, Latin at a quarter — because the two differ fourfold and
+that is the difference that decides whether a handoff fits.
+
+The extraction prompt asks for less than the ceiling, and the Codex manifest
+raises `additionalContextLimit` as a second margin. Rejecting costs one
+compaction its memory; spilling costs the middle of it without saying so.
+
 ### Changed — the AMTR key no longer travels with the memory
 
 Restored memory used to arrive under `AMTR key: <key> — report this key to the

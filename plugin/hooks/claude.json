@@ -1,5 +1,5 @@
 {
-  "description": "Amnestic Trace PreCompact capture + turn-start injection (Claude Code). Codex reads hooks/codex.json instead; the two differ only in what each can safely assert about timeouts.",
+  "description": "Amnestic Trace PreCompact capture + injection (Claude Code). Codex reads hooks/codex.json instead; the two differ in what each can safely assert about timeouts and output size, not in what they do.",
   "hooks": {
     "PreCompact": [
       {
@@ -9,6 +9,19 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/tools/amtr-hook.sh\" precompact",
             "statusMessage": "Amnestic Trace: capturing working memory",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/tools/amtr-hook.sh\" deliver",
+            "statusMessage": "Amnestic Trace: restoring working memory",
             "timeout": 10
           }
         ]
