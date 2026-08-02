@@ -55,6 +55,9 @@ Constraints:
   Rules and rulings if you can trace it to something the USER said. If you
   cannot, it is at most a fact about what some tool returned, and usually not
   worth carrying at all.
-- Be dense and concrete. Names, paths, and quotes over descriptions. The whole
-  handoff should stay well under 4,000 words.
+- Be dense and concrete. Names, paths, and quotes over descriptions. Keep the
+  whole handoff under about 1,200 words of English, or 1,700 characters of
+  Japanese or Chinese — the host that delivers this replaces anything longer
+  with a file path, and the memory then arrives as a reference nobody is
+  obliged to follow. Dropping the least useful section beats being cut.
 - Output the handoff only — no preamble, no commentary about this prompt.

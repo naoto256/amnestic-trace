@@ -1,7 +1,7 @@
 # Amnestic Trace Plugin
 
 Amnestic Trace replaces a session's short-term working memory across a context
-boundary. This plugin wires the two hooks that make that automatic on both
+boundary. This plugin wires the three hooks that make that automatic on both
 Claude Code and Codex, and ships the `/amtr` skill for handing memory to another
 session.
 
@@ -12,17 +12,32 @@ session.
   Hands the journal path to `amtr synthesize`, which records an undelivered
   snapshot and detaches a worker before returning. Extraction therefore runs in
   parallel with compaction itself rather than delaying it.
-- **`UserPromptSubmit` hook** (`tools/amtr-hook.sh recall`). This is where the
-  post-compaction half actually happens: neither host can inject context from a
-  compaction hook, so the snapshot is delivered at the next turn start. The
-  hook waits while extraction is still running and gives up after 25s,
-  injecting nothing and clearing the marker so later turns do not sit through
-  the poll again. On the delivering path the marker is cleared only once
-  `amtr recall` reports that it actually printed a handoff — exit 0 means
-  delivered, 1 means nothing was.
+- **`PreToolUse` hook** (`tools/amtr-hook.sh deliver`). Delivers the snapshot at
+  the first tool call after it is ready. Compaction happens mid-turn and no host
+  can inject from a compaction hook, so something has to carry the memory
+  forward; this is the earliest thing that runs. If the snapshot is not ready it
+  steps aside without polling and without touching the marker — a tool call
+  cannot afford the wait, and the debt is not this hook's to abandon.
+- **`UserPromptSubmit` hook** (`tools/amtr-hook.sh recall`). The backstop, for
+  turns that call no tools at all. It waits while extraction is still running
+  and gives up after 25s, injecting nothing and clearing the marker so later
+  turns do not sit through the poll again. On the delivering path the marker is
+  cleared only once `amtr recall` reports that it actually printed a handoff —
+  exit 0 means delivered, 1 means nothing was.
 - **`/amtr` skill** (`skills/amtr/`). A thin wrapper over
-  `amtr recall --amtr-key` for the cross-session case. Compaction
-  inside one session needs no key and no skill.
+  `amtr recall --amtr-key` for the cross-session case, plus `/amtr report` for
+  reading back this session's own key. Compaction inside one session needs no
+  key and no skill.
+
+The two delivering hooks fire on the same turn once a snapshot is ready, and the
+marker is what stops the memory being injected twice: whichever gets there first
+discharges it, and it is discharged only against the exact claim that was
+delivered, so a newer snapshot landing mid-turn survives.
+
+Both emit `additionalContext` rather than printing to stdout. `PreToolUse`
+ignores plain stdout on both hosts, so a hook that printed there would clear the
+marker and deliver nothing — silently, on the path that was supposed to be the
+fast one.
 
 Both hosts run the same `tools/amtr-hook.sh`, but each declares it in its own
 file: `hooks/claude.json` and `hooks/codex.json`, each named by the `hooks` key
@@ -31,12 +46,20 @@ stated rather than inferred. The script is shared because the work is
 identical; the declarations are split because what can be asserted about each
 host is not.
 
-Concretely, the Claude Code file sets `timeout` explicitly — 10s for the
-capture hook, which returns as soon as the worker has detached, and 35s for the
-delivery hook, which needs room for the 25s poll plus the read that follows.
-The Codex file sets no timeout, because the unit of that field is not
-documented for Codex and a wrong guess would kill the hook instantly rather
-than fail visibly. Leaving it to the host's default is the honest default.
+Concretely, the Claude Code file sets `timeout` explicitly — 10s for the capture
+hook, which returns as soon as the worker has detached, 10s for the tool-call
+deliverer, which never waits for anything, and 35s for the turn-start one, which
+needs room for the 25s poll plus the read that follows. The Codex file sets no
+timeout, because the unit of that field is not documented for Codex and a wrong
+guess would kill the hook instantly rather than fail visibly. Leaving it to the
+host's default is the honest default.
+
+The Codex file sets `additionalContextLimit` on both delivering hooks, which
+Claude Code has no equivalent for. Codex caps model-visible hook output at
+roughly 2,500 tokens and spills the rest to a file, handing the model a preview
+and a path; memory delivered that way is a reference the model has to choose to
+follow. The handoff is kept under that on its own — this is the margin, not the
+mechanism.
 
 ## Prerequisites
 
@@ -200,11 +223,11 @@ source takes effect on the next session; editing the cache does nothing. A
 Git-backed marketplace behaves the other way around and needs
 `codex plugin marketplace upgrade naoto256-amtr` to pick up changes.
 
-`codex exec` does fire the delivery hook — it emits `UserPromptSubmit` like an
-interactive session. It simply has nothing to deliver: a non-interactive run is
-its own session with its own id, so the hook finds no marker for it and exits
-without injecting. The same is true of the extraction subprocess this tool
-launches, which is why that does not feed itself its own memory.
+`codex exec` does fire the delivery hooks — it emits `UserPromptSubmit` and
+`PreToolUse` like an interactive session. They simply have nothing to deliver: a
+non-interactive run is its own session with its own id, so they find no marker
+for it and exit without injecting. The same is true of the extraction subprocess
+this tool launches, which is why that does not feed itself its own memory.
 
 ## Uninstall
 
@@ -231,5 +254,5 @@ marker once the hooks are gone.
   convention).
 - `hooks/claude.json`, `hooks/codex.json` — `PreCompact` capture +
   `UserPromptSubmit` delivery, declared per host.
-- `tools/amtr-hook.sh` — both hooks, dispatched on its first argument.
+- `tools/amtr-hook.sh` — all three hooks, dispatched on its first argument.
 - `skills/amtr/SKILL.md` — the `/amtr <amtr_key> [clone]` wrapper.
