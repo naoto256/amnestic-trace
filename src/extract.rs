@@ -43,9 +43,45 @@ impl From<io::Error> for Failed {
     }
 }
 
-/// A handoff longer than this is a runaway, not a summary of working memory.
-const MAX_HANDOFF_BYTES: usize = 64 * 1024;
+/// What a handoff may cost the context it is injected into, in tokens.
+///
+/// Not a preference. Hosts cap the model-visible part of a hook's output and
+/// spill the rest to a file, handing the model a head-and-tail preview and a
+/// path — so an oversized handoff does not arrive truncated, it arrives with
+/// its middle replaced, in a shape that still reads like a handoff. Measured on
+/// Codex: 9,129 characters of ASCII (~2,280 tokens) arrived whole and 11,128
+/// (~2,780) spilled, which puts the threshold where that host documents it, at
+/// roughly 2,500 tokens per message.
+///
+/// The budget here is what is left of that after the header and the preamble,
+/// with room to spare. Spilling costs more than the missing words: the file is
+/// world-readable under the system temp directory, and recovering the memory
+/// from it takes a tool call that nothing obliges the model to make.
+const MAX_HANDOFF_TOKENS: usize = 2_000;
 const MIN_HANDOFF_CHARS: usize = 20;
+
+/// Tokens, near enough to spend a budget against.
+///
+/// A real tokenizer would be a dependency, a download and a version to track,
+/// for a number this only needs to the nearest few percent. CJK runs about a
+/// token per character and Latin script about a quarter of one, which is the
+/// whole model: the two differ by 4x, and that is the difference that decides
+/// whether a handoff fits.
+///
+/// It rounds against the handoff — an estimate that reads low would let one
+/// through to be silently gutted, and reading high only costs a few sentences.
+pub fn estimated_tokens(text: &str) -> usize {
+    let (wide, narrow) = text.chars().fold((0usize, 0usize), |(w, n), c| {
+        // CJK, kana, and the fullwidth forms. Everything above this range is
+        // rarer than the error already in this estimate.
+        if ('\u{2E80}'..='\u{FFEF}').contains(&c) {
+            (w + 1, n)
+        } else {
+            (w, n + 1)
+        }
+    });
+    wide + narrow.div_ceil(4)
+}
 
 pub fn compose(prompt: &str, prior: Option<&str>, window: &str) -> String {
     format!(
@@ -253,8 +289,16 @@ pub fn validate(raw: &str) -> Result<String, String> {
     if text.chars().count() < MIN_HANDOFF_CHARS {
         return Err("produced no usable handoff".into());
     }
-    if text.len() > MAX_HANDOFF_BYTES {
-        return Err("exceeds the handoff budget".into());
+    let tokens = estimated_tokens(text);
+    if tokens > MAX_HANDOFF_TOKENS {
+        // Rejecting costs this compaction its memory, which is the lesser of
+        // the two: a handoff over the budget is delivered with its middle
+        // replaced by a file path, and nothing downstream can tell that from a
+        // handoff that simply had less to say.
+        return Err(format!(
+            "about {tokens} tokens, over the {MAX_HANDOFF_TOKENS} the host will \
+             deliver whole"
+        ));
     }
     Ok(text.to_string())
 }
@@ -276,7 +320,34 @@ mod tests {
 
     #[test]
     fn rejects_a_runaway_that_would_blow_the_budget() {
-        assert!(validate(&"x".repeat(MAX_HANDOFF_BYTES + 1)).is_err());
+        assert!(validate(&"x ".repeat(MAX_HANDOFF_TOKENS * 4)).is_err());
+    }
+
+    #[test]
+    fn the_budget_is_tokens_rather_than_characters() {
+        // The same character count costs about four times as much in Japanese,
+        // and a character budget set for one script silently mis-serves the
+        // other: generous enough for Japanese lets English spill, and tight
+        // enough for English throws away most of an English handoff.
+        let ja = "作業中の状態を引き継ぐ。".repeat(200);
+        let en = "carry the working state across the boundary. ".repeat(200);
+        assert!(ja.chars().count() < en.chars().count());
+        assert!(
+            estimated_tokens(&ja) > estimated_tokens(&en),
+            "shorter Japanese text must still cost more: {} vs {}",
+            estimated_tokens(&ja),
+            estimated_tokens(&en)
+        );
+    }
+
+    #[test]
+    fn a_handoff_the_size_of_a_real_one_fits() {
+        // The largest handoff observed in use was about 7,200 characters of
+        // mostly-Latin prose. If the budget cannot hold that, it is not a
+        // budget, it is a refusal.
+        let realistic = "Rules, rulings, and the state of the work. ".repeat(170);
+        assert!(realistic.chars().count() > 7_000);
+        assert!(validate(&realistic).is_ok());
     }
 
     #[test]

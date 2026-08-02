@@ -23,7 +23,7 @@ use store::{Row, Store};
 
 const USAGE: &str = "usage:
   amtr synthesize <session_id> <journal_path>
-  amtr recall <session_id>
+  amtr recall <session_id> [--hook-json <event>]
   amtr recall <session_id> --amtr-key <key> [--clone]
   amtr key <session_id>
   amtr default-prompt";
@@ -49,7 +49,8 @@ fn main() -> ExitCode {
 
     let outcome = match argv.as_slice() {
         ["synthesize", session_id, journal] => synthesize(session_id, Path::new(journal)),
-        ["recall", session_id] => recall(session_id),
+        ["recall", session_id] => recall(session_id, Shape::Bare),
+        ["recall", session_id, "--hook-json", event] => recall(session_id, Shape::HookJson(event)),
         ["recall", session_id, "--amtr-key", key] => adopt(session_id, key, false),
         ["recall", session_id, "--amtr-key", key, "--clone"] => adopt(session_id, key, true),
         ["key", session_id] => report_key(session_id),
@@ -229,12 +230,43 @@ fn work(store: &Store, session_id: &str, journal: &Path) -> Result<String, extra
     Ok(key)
 }
 
+/// How the hook that called us wants the memory handed back.
+///
+/// Only the wrapper differs; the memory inside is the same bytes either way.
+enum Shape<'a> {
+    /// Straight to stdout, which is what a `UserPromptSubmit` hook injects.
+    Bare,
+    /// A hook-result object carrying the memory as `additionalContext`, named
+    /// for the event that will receive it. Events that inject from stdout have
+    /// no say in how much of it survives; `additionalContext` does, and it is
+    /// the only form some events read at all — `PreToolUse` ignores plain
+    /// stdout outright, so a hook that printed there would discharge the marker
+    /// and deliver nothing.
+    HookJson(&'a str),
+}
+
 /// Pure read. Nothing is written, so a recall can be repeated freely.
-fn recall(session_id: &str) -> io::Result<Status> {
+fn recall(session_id: &str, shape: Shape) -> io::Result<Status> {
     let store = Store::open()?;
     match store.load(session_id) {
         Ok(Some(row)) => {
-            print!("{}", render(&row));
+            match shape {
+                Shape::Bare => print!("{}", render(&row)),
+                // Built here rather than in the hook: the memory is machine
+                // written from a journal, so it holds quotes, backslashes and
+                // newlines by the hundred, and a shell assembling JSON around
+                // that is one unescaped byte away from delivering nothing at
+                // all. The escaping belongs where a serializer already lives.
+                Shape::HookJson(event) => println!(
+                    "{}",
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": event,
+                            "additionalContext": render(&row),
+                        }
+                    })
+                ),
+            }
             Ok(Status::Delivered)
         }
         // No row is the normal state before the first compaction.

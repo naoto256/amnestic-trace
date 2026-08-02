@@ -2,10 +2,20 @@
 # Amnestic Trace hook entry point for both Claude Code and Codex.
 #
 #   amtr-hook.sh precompact   <- PreCompact:        start a detached synthesize
-#   amtr-hook.sh recall       <- UserPromptSubmit:  inject the replacement memory
+#   amtr-hook.sh deliver      <- PreToolUse:        inject at the first tool call
+#   amtr-hook.sh recall       <- UserPromptSubmit:  inject at the next turn start
 #
 # PreCompact/PostCompact hooks cannot inject context on either host, so the
-# post-compaction half is realized at the next turn start.
+# post-compaction half is realized later, and "later" is the whole problem this
+# has two deliverers for. A compaction fires mid-turn; the session then keeps
+# working, sometimes for half an hour, and `UserPromptSubmit` does not run again
+# until the user says something. Everything done in between is missing from a
+# memory that was accurate when it was taken. `PreToolUse` runs throughout that
+# stretch, so it delivers first and the turn-start hook becomes the backstop for
+# turns that call no tools at all.
+#
+# Whichever arrives first discharges the marker, and the marker is what keeps
+# the other from delivering it twice.
 #
 # Every path exits 0 with no stdout unless there is something to inject: the
 # hook must never be the reason a turn fails.
@@ -107,6 +117,28 @@ mkdir -p "$(dirname "$amtr_home")" 2>/dev/null
 log="$amtr_home/amtr.log"
 { true >>"$log"; } 2>/dev/null || log=/dev/null
 
+# Hands the memory to the host, then discharges the debt — in that order, so
+# nothing is marked delivered by a hook that failed to inject it. `amtr recall`
+# exits 0 only when it printed a handoff.
+#
+# `$1` is the event whose shape the output must take. The binary builds that
+# JSON rather than this script: a handoff is machine-written from a journal and
+# arrives full of quotes, backslashes and newlines, and a shell wrapping JSON
+# around that by hand is one unescaped byte away from delivering nothing at all.
+#
+# stderr goes to the log because an unparseable row fails here on every turn,
+# and the reason is the only evidence anyone gets.
+deliver_claim() {
+	if amtr recall "$session_id" --hook-json "$1" 2>>"$log"; then
+		# The whole claim, not just its shape. A compaction can finish while
+		# this turn is in flight, and its `ready:<newer key>` must not be
+		# discharged by whoever delivered the older one.
+		if [ "$(cat "$marker" 2>/dev/null)" = "$2" ]; then
+			rm -f "$marker"
+		fi
+	fi
+}
+
 case "$event" in
 precompact)
 	journal=$(field transcript_path)
@@ -126,9 +158,32 @@ precompact)
 	# exactly the failure that would leave no trace.
 	amtr synthesize "$session_id" "$journal" >/dev/null 2>>"$log"
 	;;
+deliver)
+	# PreToolUse. Runs many times a turn, so it does nothing but look at one
+	# file unless a snapshot is actually owed.
+	[ -f "$marker" ] || exit 0
+
+	# Deliberately no poll here. A turn-start hook can afford to wait out an
+	# extraction because the user has just spoken and is waiting anyway; a tool
+	# call cannot, and stalling every tool call for the better part of a minute
+	# would be a worse tool than the memory is a good one. If the snapshot is
+	# not ready yet this simply steps aside: the next tool call is moments away,
+	# and the turn-start hook is still behind it.
+	claim=$(cat "$marker" 2>/dev/null)
+	case "$claim" in
+	ready:*) ;;
+	# Not ready, so nothing to deliver — and, unlike the turn-start path, the
+	# marker stays. Giving up on the debt is the backstop's decision to make;
+	# this one is only ever early.
+	*) exit 0 ;;
+	esac
+
+	deliver_claim PreToolUse "$claim"
+	;;
 recall)
 	# The marker is an undelivered snapshot, not a "compaction happened" flag.
-	# Its absence is the normal state of every turn not following a compaction.
+	# Its absence is the normal state of every turn not following a compaction —
+	# including every turn where the delivery above already discharged it.
 	[ -f "$marker" ] || exit 0
 
 	# The poll budget is 25s. hooks/claude.json declares a 35s timeout around
@@ -160,18 +215,7 @@ recall)
 		;;
 	esac
 
-	# Deliver first, then discharge, so nothing is marked delivered on a turn
-	# that failed to inject it: `amtr recall` exits 0 only when it printed a
-	# handoff. stderr goes to the log because an unparseable row fails here on
-	# every turn and the reason is the only evidence of it.
-	if amtr recall "$session_id" 2>>"$log"; then
-		# The whole claim, not just its shape. A compaction can finish while
-		# this turn is in flight, and its `ready:<newer key>` must not be
-		# discharged by the turn that delivered the older one.
-		if [ "$(cat "$marker" 2>/dev/null)" = "$claim" ]; then
-			rm -f "$marker"
-		fi
-	fi
+	deliver_claim UserPromptSubmit "$claim"
 	;;
 esac
 exit 0
