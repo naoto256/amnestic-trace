@@ -25,7 +25,7 @@ session.
   cleared only once `amtr recall` reports that it actually printed a handoff —
   exit 0 means delivered, 1 means nothing was.
 - **`/amtr` skill** (`skills/amtr/`). A thin wrapper over
-  `amtr recall --amtr-key` for the cross-session case, plus `/amtr report` for
+  `amtr recall --amtr-key` for the cross-session case, plus a bare `/amtr` for
   reading back this session's own key. Compaction inside one session needs no
   key and no skill.
 
