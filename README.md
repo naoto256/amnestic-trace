@@ -288,8 +288,8 @@ Do not dump the hook's stdin to a file to check this. That payload carries the
 user's prompt text, and a predictable path under `/tmp` is a poor place to put
 it. If you must capture it, use `umask 077` and `mktemp`, and delete it after.
 
-**6. Handoff.** In session A, run `/amtr report` to obtain its key — it is not
-in A's context, so this is the only way to get it. Then in session B, run
+**6. Handoff.** In session A, run `/amtr` with no key to obtain its own — it is
+not in A's context, so this is the only way to get it. Then in session B, run
 `/amtr <that key>`. B should receive
 A's memory; A's row must be gone (`ls` the cortex directory). With `clone`, A's
 row must survive and B's must have `"amtr_key": null`.
