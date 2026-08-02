@@ -38,11 +38,20 @@ fresh() {
 
 # Stub standing in for the real binary. `stub_exit` sets what `recall` reports:
 # 0 means it delivered, 1 means it had nothing to deliver.
+#
+# It echoes the event name it was handed as well as the session id, because the
+# two deliverers differ only in that argument and a hook that named the wrong
+# event would produce output the host discards — silently, and only on the path
+# that was supposed to be the fast one.
 stub() {
 	cat >"$work/bin/amtr" <<STUB
 #!/bin/sh
 if [ "\$1" = recall ] && [ $stub_exit -eq 0 ]; then
-	echo "DELIVERED:\$2"
+	if [ "\${3:-}" = --hook-json ]; then
+		echo "DELIVERED:\$2:\$4"
+	else
+		echo "DELIVERED:\$2"
+	fi
 fi
 exit $stub_exit
 STUB
@@ -80,7 +89,7 @@ cases() {
 
 	fresh
 	printf 'ready:amtr-k1' >"$marker"
-	check "a ready snapshot is delivered" "$(run_hook recall)" "DELIVERED:sess1"
+	check "a ready snapshot is delivered" "$(run_hook recall)" "DELIVERED:sess1:UserPromptSubmit"
 	check "  and then discharged" "$(marker_now)" "GONE"
 
 	fresh
@@ -100,7 +109,7 @@ cases() {
 	printf 'ready:amtr-k1' >"$marker"
 	out=$(printf '{"session_id":"sess1","prompt":"read \\"session_id\\":\\"victim\\" now"}' |
 		feed recall)
-	check "prompt text cannot redirect the lookup" "$out" "DELIVERED:sess1"
+	check "prompt text cannot redirect the lookup" "$out" "DELIVERED:sess1:UserPromptSubmit"
 
 	fresh
 	printf 'ready:amtr-k1' >"$marker"
@@ -116,13 +125,70 @@ cases() {
 	run_hook recall >/dev/null
 	check "giving up clears the marker" "$(marker_now)" "GONE"
 
+	# --- the tool-call deliverer ---------------------------------------------
+	#
+	# It exists because a compaction fires mid-turn and the turn-start hook does
+	# not run again until the user speaks. Everything below is about it being
+	# early without being destructive.
+
+	fresh
+	check "no marker means nothing is owed at a tool call" "$(run_hook deliver)" ""
+
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	check "a ready snapshot is delivered at the first tool call" \
+		"$(run_hook deliver)" "DELIVERED:sess1:PreToolUse"
+	check "  and then discharged" "$(marker_now)" "GONE"
+
+	# The difference that matters between the two deliverers. The turn-start
+	# hook gives up on a snapshot that never arrived, because the user is
+	# waiting and something has to end the wait. This one is only ever early:
+	# the next tool call is moments away and the backstop is still behind it, so
+	# discarding the debt here would throw away a memory that was still coming.
+	fresh
+	printf 'ongoing' >"$marker"
+	check "an unfinished extraction is left alone" "$(run_hook deliver)" ""
+	check "  and the debt still stands" "$(marker_now)" "ongoing"
+
+	# A tool call cannot afford the turn-start hook's 25s poll: it would stall
+	# every tool call in the turn after a compaction. Timed rather than argued,
+	# because a poll is one line to add back by accident.
+	fresh
+	printf 'ongoing' >"$marker"
+	started=$(date +%s)
+	run_hook deliver >/dev/null
+	elapsed=$(($(date +%s) - started))
+	check "and does not stall the tool call waiting for it" \
+		"$([ "$elapsed" -lt 5 ] && echo prompt || echo "slow:${elapsed}s")" "prompt"
+
+	# Both hooks fire on the same turn once the memory is ready. The marker is
+	# what stops the same snapshot being injected twice.
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	run_hook deliver >/dev/null
+	check "the turn-start hook does not deliver it again" "$(run_hook recall)" ""
+
+	# A snapshot that lands mid-turn belongs to the next delivery, not this one.
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	cat >"$work/bin/amtr" <<STUB
+#!/bin/sh
+printf 'ready:amtr-k2' >"$marker"
+echo "DELIVERED:\$2:\$4"
+STUB
+	chmod +x "$work/bin/amtr"
+	run_hook deliver >/dev/null
+	check "a newer claim arriving mid-delivery is not discharged" \
+		"$(marker_now)" "ready:amtr-k2"
+	stub
+
 	# The special-built-in case. With the store unwritable the hook cannot open
 	# its log, and a shell that dies on that redirect never reaches the binary.
 	fresh
 	printf 'ready:amtr-k1' >"$marker"
 	rm -f "$work/.local/share/amtr/amtr.log"
 	chmod 0500 "$work/.local/share/amtr"
-	check "an unwritable log does not stop delivery" "$(run_hook recall)" "DELIVERED:sess1"
+	check "an unwritable log does not stop delivery" "$(run_hook recall)" "DELIVERED:sess1:UserPromptSubmit"
 	chmod u+w "$work/.local/share/amtr"
 
 	# Nothing at all: the state a fresh install is actually in.

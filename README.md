@@ -16,6 +16,7 @@ generations, and no shared memory.
 ```
 amtr synthesize <session_id> <journal_path>   # PreCompact: detach and extract
 amtr recall <session_id>                      # pure read
+amtr recall <session_id> --hook-json <event>  # the same, shaped for a hook
 amtr recall <session_id> --amtr-key <key>      # cross-session handoff (MOVE)
 amtr recall <session_id> --amtr-key <key> --clone
 amtr key <session_id>                         # this session's own key
@@ -54,6 +55,53 @@ and the next compaction rebuilds from it.
 
 Because the key is part of the marker, a reader discharges only the exact debt
 it delivered. A snapshot that lands mid-turn is a different claim and survives.
+
+## Two deliverers
+
+A compaction fires in the middle of a turn, and the memory it produces cannot be
+injected from the compaction hook on either host. So delivery waits — and what
+it waits for decides how stale the memory is when it lands.
+
+`UserPromptSubmit` waits for the user to speak again. A session that keeps
+working in between — the ordinary case for an agent left to run — can finish
+everything the snapshot still calls pending. Half an hour of work has been
+observed in that gap, with the memory arriving afterwards describing the state
+before it.
+
+`PreToolUse` runs throughout that stretch, so it delivers at the first tool call
+instead:
+
+```
+PreToolUse        ready:<key> -> inject, discharge.  Otherwise step aside.
+UserPromptSubmit  poll 25s, then inject or give up.  Backstop.
+```
+
+They differ in what they do when the snapshot is not ready yet. The turn-start
+hook has a user waiting on it, so it waits out the extraction and then gives up
+for good. The tool-call hook is only ever early: the next tool call is moments
+away and the backstop is still behind it, so it leaves the marker alone and does
+not poll — stalling every tool call in a turn would cost more than the memory is
+worth.
+
+Whichever arrives first discharges the marker, which is what stops the other
+from injecting the same memory twice.
+
+## Size
+
+Hosts cap the model-visible part of a hook's output and spill the rest to a
+file, handing the model a head-and-tail preview and a path. An oversized handoff
+therefore does not arrive short — it arrives with its middle replaced, in a
+shape that still reads like a handoff, and recovering the rest takes a tool call
+nothing obliges the model to make.
+
+Measured on Codex: 9,129 characters of ASCII arrived whole, 11,128 spilled,
+which puts the threshold at the ~2,500 tokens per message that host documents.
+`validate` rejects a handoff estimated over 2,000 tokens rather than let one
+through to be gutted, the extraction prompt asks for less than that, and the
+Codex manifest raises `additionalContextLimit` as a second margin.
+
+Rejecting costs one compaction its memory. Spilling costs the middle of it
+without saying so.
 
 Every failure writes nothing to stdout, so the host injects nothing and the turn
 proceeds. The next compaction redoes the work.
@@ -210,6 +258,18 @@ it, and the marker should be gone afterwards. Run Claude Code with
 Ask the assistant whether its memory was restored, and it should be able to
 answer from that line — the tool is otherwise silent, so this is what makes a
 working injection distinguishable from a hook that never ran.
+
+**3b. The tool-call deliverer beats the turn-start one.** The case it exists
+for: after a compaction, have the session keep working without you saying
+anything — any task that runs a few tools. The memory should be delivered at the
+first tool call after the snapshot is ready, not held until your next prompt.
+Check the marker is gone before you speak again.
+
+A hook that never delivers here is silent by design, so the marker is the
+evidence: `ready:<key>` still sitting there while the session runs tools means
+the tool-call path is not firing. On Codex that is usually trust — changing
+anything in a hook definition, including a status message, invalidates the
+approval, and an unapproved hook does not run and does not say so.
 
 **4. Fail-open on timeout.** Write `ongoing` to a marker by hand for a live
 session and send a prompt. The turn must proceed normally after ~25s with
