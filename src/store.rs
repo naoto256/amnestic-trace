@@ -77,11 +77,15 @@ impl Store {
     /// Opens (and creates) a store rooted at an explicit base. Tests use this.
     ///
     /// The tree is owner-only because it is where every session's handoff ends
-    /// up at once, which is worth more than the ambient umask decides on the
-    /// day. Not because a handoff is a secret: it is derived from a journal the
-    /// host already wrote, and on one of the two hosts that journal is
-    /// world-readable, so this protects nothing that is not more freely
-    /// readable elsewhere.
+    /// up at once, which is worth more than whatever umask the day supplies.
+    /// The rows also carry each snapshot's key, which is the one thing here
+    /// that is not in the journal the handoff was made from.
+    ///
+    /// None of which makes this a boundary, and it should not be described as
+    /// one. A handoff is derived from a journal the host already wrote — on one
+    /// of the two hosts, world-readable — and anything running as this user can
+    /// read that journal directly. The mode is tidiness about an aggregate, not
+    /// protection from anyone.
     pub fn at(base: PathBuf) -> io::Result<Store> {
         // Created 0700 in the first place where the platform allows it, rather
         // than created then tightened — the latter leaves a brief window at the

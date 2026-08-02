@@ -72,9 +72,11 @@ const MIN_HANDOFF_CHARS: usize = 20;
 /// through to be silently gutted, and reading high only costs a few sentences.
 pub fn estimated_tokens(text: &str) -> usize {
     let (wide, narrow) = text.chars().fold((0usize, 0usize), |(w, n), c| {
-        // CJK, kana, and the fullwidth forms. Everything above this range is
-        // rarer than the error already in this estimate.
-        if ('\u{2E80}'..='\u{FFEF}').contains(&c) {
+        // CJK, kana, and the fullwidth forms, plus the supplementary planes
+        // where the rest of Han lives. The estimate is allowed to be rough but
+        // not to round in the handoff's favour: anything counted narrow that is
+        // not passes validation and is then delivered with its middle gone.
+        if ('\u{2E80}'..='\u{FFEF}').contains(&c) || c >= '\u{1F000}' {
             (w + 1, n)
         } else {
             (w, n + 1)
@@ -338,6 +340,21 @@ mod tests {
             estimated_tokens(&ja),
             estimated_tokens(&en)
         );
+    }
+
+    #[test]
+    fn text_outside_the_basic_plane_is_not_counted_as_cheap() {
+        // Han past U+FFFF, and emoji, which a handoff picks up from quoted
+        // journal text. Counting either at a quarter of a token is the one
+        // direction this estimate must not err in.
+        for wide in ["\u{20000}", "\u{2A700}", "😀"] {
+            let text = wide.repeat(400);
+            assert!(
+                estimated_tokens(&text) > 300,
+                "{wide:?} counted cheap: {} tokens for 400 characters",
+                estimated_tokens(&text)
+            );
+        }
     }
 
     #[test]
