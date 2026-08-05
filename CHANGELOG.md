@@ -6,7 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Pre-1.0 releases may introduce breaking changes freely as the storage layout and hook contract converge. After 1.0, changes will follow semver strictly.
 
-## [Unreleased]
+## [0.1.1] - 2026-08-05
+
+> what cannot cross whole crosses as a key
+
+Upgrading on Codex requires re-approving the plugin's hooks: this release adds
+a third hook, and Codex trusts hook definitions by hash, so every change to
+them invalidates the old approval. An unapproved hook is skipped silently —
+there is no error to notice, the memory just stops arriving.
+
+### Changed — the extraction prompt knows what a ruling is, and what it may never drop
+
+The shipped prompt asked for the right sections but left "obsolete" undefined,
+and the extractor decided it per-turn: rulings set during one phase of work
+vanished once the work moved on. Twenty-four measured compactions of one long
+session showed the pattern — a project-scoped prohibition and a working-cadence
+agreement survived 23 and 20 generations, while every phase-scoped ruling was
+gone within six.
+
+The pruning test is now explicit, and explicitly does not reach Rules and
+rulings: a ruling leaves only by being superseded or shrunk. The budget rule
+says the same from the other end — shrink before deleting, drop rulings last,
+and a ruling too long to quote becomes a one-line key naming its topic, because
+a key lets the waking session recover the words where an absence leaves nothing
+to even miss. Task map now opens with what is being worked on and must name
+what was NOT checked, since compaction lands mid-investigation and prose makes
+a hypothesis read like a finding. And "the user" became "a principal" —
+sessions run to another agent's brief as often as to a person's.
+
+The injected preamble carries the reader's half of the same contract: the
+memory is a compression, not a copy, and a line shrunk to a bare key is a place
+to recover context from, not a gap to fill from plausibility.
+
+### Fixed — the shared log no longer accumulates every project's memory
+
+The extraction agent's stderr was inherited into the worker's log for
+diagnostics, but the agent CLIs echo their final message there — the entire
+handoff. Every successful extraction for every project on the machine was
+appending its working memory to one plain-text file. Stderr is now captured
+and written to the log only when extraction fails; on success it is dropped
+unread. The `/amtr` skill got the matching discipline: one command, its
+printed result, and no rummaging through the store or the log when the answer
+is "no snapshot".
 
 ### Added — the memory is delivered at the first tool call, not the next prompt
 
@@ -158,5 +199,5 @@ The exit status distinguishes what happened, because the delivery hook depends
 on it: `0` handed over a handoff, `1` had nothing to hand over or failed, `2`
 was called wrong. A caller that discharges a snapshot should do so only on `0`.
 
-[Unreleased]: https://github.com/naoto256/amnestic-trace/compare/v0.1.0...HEAD
+[0.1.1]: https://github.com/naoto256/amnestic-trace/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/naoto256/amnestic-trace/releases/tag/v0.1.0
