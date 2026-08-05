@@ -203,9 +203,13 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // Inherited so the agent's own diagnostics land in the worker's log
-        // rather than vanishing.
-        .stderr(Stdio::inherit())
+        // Captured, not inherited. The agent CLIs echo their final message to
+        // stderr — the whole handoff, for every project on the machine — and
+        // inheriting fed all of it into the shared log, which the store's own
+        // one-row-per-session design exists to not do. The log explains the
+        // last failure, so the capture is written out on failure and dropped
+        // on success.
+        .stderr(Stdio::piped())
         .spawn()
         // Not installed, not on PATH, not executable: nothing about this window
         // is wrong, so the marker should survive for a later attempt.
@@ -230,6 +234,18 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
         source.read_to_end(&mut buf).map(|_| buf)
     });
 
+    // Drained off-thread like the others so a chatty child cannot fill the
+    // pipe and stall. Held back until the outcome is known.
+    let mut err_source = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("no stderr"))?;
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_source.read_to_end(&mut buf);
+        buf
+    });
+
     let deadline = Instant::now() + EXTRACTION_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -238,6 +254,7 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            surface_agent_stderr(err_reader);
             return Err(Failed::Failed("extraction agent timed out".into()));
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -254,11 +271,32 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
     if !status.success() {
         // The agent ran and decided it could not do this. Feeding it the same
         // window again will reach the same place.
+        surface_agent_stderr(err_reader);
         return Err(Failed::Failed(format!(
             "extraction agent exited with {status}"
         )));
     }
-    validate(&strip_preamble(&String::from_utf8_lossy(&stdout))).map_err(Failed::Failed)
+    match validate(&strip_preamble(&String::from_utf8_lossy(&stdout))) {
+        Ok(handoff) => Ok(handoff),
+        Err(e) => {
+            surface_agent_stderr(err_reader);
+            Err(Failed::Failed(e))
+        }
+    }
+}
+
+/// Writes the agent's captured stderr into the worker's log, failure paths
+/// only. On success it is dropped unread: the CLIs echo their final message
+/// there, and a log that accumulated every project's handoff would keep
+/// exactly the history the store is designed not to.
+fn surface_agent_stderr(reader: std::thread::JoinHandle<Vec<u8>>) {
+    if let Ok(buf) = reader.join() {
+        let text = String::from_utf8_lossy(&buf);
+        let text = text.trim();
+        if !text.is_empty() {
+            eprintln!("agent stderr:\n{text}");
+        }
+    }
 }
 
 /// Drops anything before the first `##` heading.
