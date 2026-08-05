@@ -203,12 +203,14 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // Captured, not inherited. The agent CLIs echo their final message to
-        // stderr — the whole handoff, for every project on the machine — and
-        // inheriting fed all of it into the shared log, which the store's own
-        // one-row-per-session design exists to not do. The log explains the
-        // last failure, so the capture is written out on failure and dropped
-        // on success.
+        // Captured and discarded, never inherited. The agent CLIs echo their
+        // final message to stderr — the whole handoff — so inheriting fed every
+        // project's working memory into one shared log, which the store's
+        // one-row-per-session design exists to not keep. Writing it out only on
+        // failure does not fix that: a handoff too long to validate, or a run
+        // killed mid-answer, is exactly when there is a handoff on stderr to
+        // leak. The channel carries content and diagnostics mixed together and
+        // nothing here can tell them apart, so none of it is logged.
         .stderr(Stdio::piped())
         .spawn()
         // Not installed, not on PATH, not executable: nothing about this window
@@ -254,7 +256,7 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            surface_agent_stderr(err_reader);
+            note_agent_stderr(err_reader);
             return Err(Failed::Failed("extraction agent timed out".into()));
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -271,7 +273,7 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
     if !status.success() {
         // The agent ran and decided it could not do this. Feeding it the same
         // window again will reach the same place.
-        surface_agent_stderr(err_reader);
+        note_agent_stderr(err_reader);
         return Err(Failed::Failed(format!(
             "extraction agent exited with {status}"
         )));
@@ -279,23 +281,27 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
     match validate(&strip_preamble(&String::from_utf8_lossy(&stdout))) {
         Ok(handoff) => Ok(handoff),
         Err(e) => {
-            surface_agent_stderr(err_reader);
+            note_agent_stderr(err_reader);
             Err(Failed::Failed(e))
         }
     }
 }
 
-/// Writes the agent's captured stderr into the worker's log, failure paths
-/// only. On success it is dropped unread: the CLIs echo their final message
-/// there, and a log that accumulated every project's handoff would keep
-/// exactly the history the store is designed not to.
-fn surface_agent_stderr(reader: std::thread::JoinHandle<Vec<u8>>) {
-    if let Ok(buf) = reader.join() {
-        let text = String::from_utf8_lossy(&buf);
-        let text = text.trim();
-        if !text.is_empty() {
-            eprintln!("agent stderr:\n{text}");
-        }
+/// Records that the agent wrote to stderr, and how much, without recording
+/// what. The failure itself is already named by the `Failed` this accompanies
+/// — could not start, timed out, exited with a status, failed validation —
+/// which is what the log is for. The bytes themselves stay out of it: they are
+/// the agent's final message as often as a diagnostic, and a size is enough to
+/// tell an operator whether re-running the agent by hand will show them
+/// anything.
+fn note_agent_stderr(reader: std::thread::JoinHandle<Vec<u8>>) {
+    let bytes = reader.join().map(|b| b.len()).unwrap_or(0);
+    if bytes > 0 {
+        eprintln!(
+            "{}: extraction agent wrote {bytes} bytes to stderr (not logged: \
+             the agent CLIs echo the handoff there)",
+            crate::store::now(),
+        );
     }
 }
 
