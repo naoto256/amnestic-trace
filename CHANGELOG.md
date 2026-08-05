@@ -43,11 +43,20 @@ to recover context from, not a gap to fill from plausibility.
 The extraction agent's stderr was inherited into the worker's log for
 diagnostics, but the agent CLIs echo their final message there — the entire
 handoff. Every successful extraction for every project on the machine was
-appending its working memory to one plain-text file. Stderr is now captured
-and written to the log only when extraction fails; on success it is dropped
-unread. The `/amtr` skill got the matching discipline: one command, its
-printed result, and no rummaging through the store or the log when the answer
-is "no snapshot".
+appending its working memory to one plain-text file.
+
+Stderr is now captured and discarded. Not on success only: failure is exactly
+when there is a handoff on that stream to lose, because a run that timed out
+mid-answer or produced a handoff too long to validate has already had it
+echoed. The stream carries the agent's final message and its diagnostics
+mixed together and nothing in the code can tell them apart, so the log gets
+the byte count and a note that the content was withheld. The failure itself is
+already named — could not start, timed out, exited with a status, failed
+validation — and that is what the log is for.
+
+The `/amtr` skill got the matching discipline: one command, its printed
+result, and no rummaging through the store or the log when the answer is "no
+snapshot".
 
 ### Added — the memory is delivered at the first tool call, not the next prompt
 

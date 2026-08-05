@@ -154,7 +154,7 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 /// tool's own — other sessions' handoffs, their keys, the prompt — is sitting
 /// in reach of whatever does run.
 pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
-    let mut cmd = match host {
+    let cmd = match host {
         Host::Claude => {
             let mut c = Command::new("claude");
             c.args([
@@ -198,7 +198,16 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
             c
         }
     };
+    drive(cmd, input, workdir)
+}
 
+/// Feeds `cmd` the composed input and validates what comes back.
+///
+/// Split from `run` so a test can supply a command that fails on purpose. The
+/// stderr rule this enforces cannot be checked by reading the code — one
+/// attempt at it already passed review while leaving the failure paths open —
+/// so it needs a fake agent that writes a marker to stderr and exits badly.
+fn drive(mut cmd: Command, input: &str, workdir: &Path) -> Result<String, Failed> {
     let mut child = cmd
         .current_dir(workdir)
         .stdin(Stdio::piped())
@@ -256,8 +265,8 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            note_agent_stderr(err_reader);
-            return Err(Failed::Failed("extraction agent timed out".into()));
+            let note = stderr_note(err_reader);
+            return Err(Failed::Failed(format!("extraction agent timed out{note}")));
         }
         std::thread::sleep(Duration::from_millis(200));
     };
@@ -273,35 +282,40 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
     if !status.success() {
         // The agent ran and decided it could not do this. Feeding it the same
         // window again will reach the same place.
-        note_agent_stderr(err_reader);
+        let note = stderr_note(err_reader);
         return Err(Failed::Failed(format!(
-            "extraction agent exited with {status}"
+            "extraction agent exited with {status}{note}"
         )));
     }
     match validate(&strip_preamble(&String::from_utf8_lossy(&stdout))) {
         Ok(handoff) => Ok(handoff),
         Err(e) => {
-            note_agent_stderr(err_reader);
-            Err(Failed::Failed(e))
+            let note = stderr_note(err_reader);
+            Err(Failed::Failed(format!("{e}{note}")))
         }
     }
 }
 
-/// Records that the agent wrote to stderr, and how much, without recording
-/// what. The failure itself is already named by the `Failed` this accompanies
-/// — could not start, timed out, exited with a status, failed validation —
-/// which is what the log is for. The bytes themselves stay out of it: they are
-/// the agent's final message as often as a diagnostic, and a size is enough to
-/// tell an operator whether re-running the agent by hand will show them
-/// anything.
-fn note_agent_stderr(reader: std::thread::JoinHandle<Vec<u8>>) {
-    let bytes = reader.join().map(|b| b.len()).unwrap_or(0);
-    if bytes > 0 {
-        eprintln!(
-            "{}: extraction agent wrote {bytes} bytes to stderr (not logged: \
-             the agent CLIs echo the handoff there)",
-            crate::store::now(),
-        );
+/// Says that the agent wrote to stderr, and how much, without saying what.
+///
+/// Returned rather than printed, so that the `Failed` message is the only
+/// channel from here to the log. Printing directly would leave a second one,
+/// and it is a second one that went wrong before: an earlier version captured
+/// these bytes and logged them on failure, which reads safe and is not —
+/// failure is when there is a handoff on stderr to leak. With one channel, a
+/// test that inspects the returned failure has inspected all of them.
+///
+/// The bytes themselves never travel. They are the agent's final message as
+/// often as a diagnostic, nothing here can tell those apart, and a size is
+/// enough to tell an operator whether re-running the agent by hand will show
+/// them anything.
+fn stderr_note(reader: std::thread::JoinHandle<Vec<u8>>) -> String {
+    match reader.join().map(|b| b.len()).unwrap_or(0) {
+        0 => String::new(),
+        bytes => format!(
+            " (it also wrote {bytes} bytes to stderr, withheld: the agent CLIs \
+             echo the handoff there)"
+        ),
     }
 }
 
@@ -352,6 +366,119 @@ pub fn validate(raw: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Set on the re-executed test binary to turn it into the helper below.
+    const HELPER: &str = "AMTR_TEST_FAILING_AGENT";
+    const HELPER_TEST: &str = "extract::tests::run_as_the_failing_agent_helper";
+    const MARKER: &str = "CANARYHANDOFFTEXT";
+    /// What the helper prefixes the failure with, so the parent can tell a
+    /// reported failure apart from anything else on stdout.
+    const REPORTED: &str = "FAILURE=";
+
+    /// The helper. Inert unless `HELPER` is set, so a normal run passes it by.
+    ///
+    /// Its whole reason for existing is that the assertion needs a process
+    /// whose fd 2 is a file, and fd 2 is process-global: doing that with
+    /// `dup2` inside the test runner would redirect unrelated tests running
+    /// concurrently, and a panic between redirect and restore would strand the
+    /// rest of the run on the capture file. So the parent re-executes this
+    /// binary instead and owns the child's stderr from the outside, where
+    /// nothing else shares it.
+    #[test]
+    fn run_as_the_failing_agent_helper() {
+        let Ok(spec) = std::env::var(HELPER) else {
+            return;
+        };
+        let (stdout, code) = spec.split_once(' ').expect("helper spec");
+
+        let dir = std::env::temp_dir().join(format!("amtr-drive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("workdir");
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "cat >/dev/null; printf %s '{stdout}'; printf %s '{MARKER}' >&2; exit {code}"
+        ));
+        let outcome = drive(cmd, "irrelevant input", &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // stdout, because the parent has taken stderr for the capture.
+        match outcome {
+            Ok(handoff) => println!("UNEXPECTED_SUCCESS={handoff}"),
+            Err(e) => println!("{REPORTED}{e}"),
+        }
+    }
+
+    /// Re-executes the test binary as the helper, with its stderr pointed at a
+    /// fresh file. Returns what the helper printed and what landed in that
+    /// file — which in the worker is the log.
+    fn drive_a_failing_agent(stdout: &str, code: i32) -> (String, String) {
+        let log = std::env::temp_dir().join(format!(
+            "amtr-captured-stderr-{}-{code}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let sink = std::fs::File::create(&log).expect("capture file");
+
+        let out = Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", HELPER_TEST, "--nocapture", "--test-threads=1"])
+            .env(HELPER, format!("{stdout} {code}"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(sink))
+            .output()
+            .expect("re-exec the test binary as the helper");
+        assert!(out.status.success(), "helper exited with {}", out.status);
+
+        let captured = std::fs::read_to_string(&log).expect("read the capture");
+        std::fs::remove_file(&log).expect("clean up the capture");
+        (String::from_utf8_lossy(&out.stdout).into_owned(), captured)
+    }
+
+    #[test]
+    fn a_failing_agents_stderr_never_reaches_the_log() {
+        // Inspection is not enough here: the first attempt at this rule logged
+        // stderr "only on failure", which reads safe and is not — a run killed
+        // mid-answer or one whose handoff was too long to validate has already
+        // had that handoff echoed to stderr by the CLI. Both failure paths are
+        // driven with a marker standing in for it.
+        for (case, stdout, code) in [
+            ("nonzero exit", "", 9),
+            // Exits 0 with output too short to be a handoff, so the failure is
+            // `validate`'s rather than the child's.
+            ("invalid output", "no", 0),
+        ] {
+            let (printed, log) = drive_a_failing_agent(stdout, code);
+
+            // Catches the regression at its source: with `Stdio::inherit()`
+            // the agent writes to the helper's own fd 2, which is this file.
+            assert!(
+                !log.contains(MARKER),
+                "{case}: the agent's stderr reached the log: {log}"
+            );
+
+            // And catches it downstream, where the first attempt put it: a
+            // failure path that folds the captured bytes into its own message
+            // logs them just as surely, since the failure is what gets logged.
+            // Not a line prefix: `--nocapture` leaves the harness's own
+            // "test ... " on the front of the same line.
+            let reported = printed
+                .split_once(REPORTED)
+                .and_then(|(_, rest)| rest.lines().next())
+                .unwrap_or_else(|| panic!("{case}: the helper reported no failure: {printed}"));
+            assert!(
+                !reported.contains(MARKER),
+                "{case}: the agent's stderr reached the failure message: {reported}"
+            );
+            // The failure still has to be legible, or the rule would be
+            // satisfied by saying nothing at all.
+            assert!(
+                reported.len() > "no snapshot written: ".len(),
+                "{case}: the failure says nothing about itself: {reported}"
+            );
+        }
+    }
 
     #[test]
     fn rejects_empty_and_whitespace_output() {
