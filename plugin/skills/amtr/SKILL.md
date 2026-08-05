@@ -22,6 +22,13 @@ One command, both ends of the same handoff: run it bare where the work is, and
 with the key it prints where the work is going. Having a key or not having one is
 the whole difference, which is why there is no third word for it.
 
+Either way this skill is one command and its printed result, nothing more. Do
+not list the store directory, read `amtr.log`, or query the store with other
+sessions' ids — a "no" from the command is the answer, not a lead. The log in
+particular holds diagnostics from every project on this machine, so reading it
+pulls other work's context into this session for no benefit to the user's
+request.
+
 The default is a handoff (引き継ぎ), not a fan-out: after a move, the giving
 session's next compaction starts from nothing. Use `clone` only when the other
 session is meant to keep working.
@@ -85,6 +92,11 @@ PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin" \
   amtr key "${CLAUDE_CODE_SESSION_ID:-$CODEX_THREAD_ID}"
 ```
 
+If neither session variable is set, stop and say so, the same as the keyed
+form: the host did not tell this session what it is called, and no other id —
+not one from a transcript path, a summary, or an earlier conversation — may
+stand in for it.
+
 Read the key out of the command's output rather than from anything in your
 context. A key names one snapshot, not a lineage: every compaction mints a new
 one, so a key remembered from earlier in the conversation may name a snapshot
@@ -98,10 +110,15 @@ show the command the other end will run, since that is what the key is for:
 /amtr <the key you just printed>
 ```
 
-Nothing printed (exit 1) means this session has no key: either no compaction has
-happened yet, or its memory arrived by `clone`, which carries none until the
-session's own first compaction. Say which, if the conversation makes it clear,
-and do not offer a key from elsewhere.
+Nothing printed (exit 1) means the store has no key under this session's name,
+and that is the complete report: "this session has no snapshot to hand over."
+The usual reason is that no compaction has happened yet (memory that arrived by
+`clone` also carries no key until this session's own first compaction), but the
+command's silence does not say which, and neither can you — so do not
+investigate. No listing the store, no reading logs, no trying other ids, no
+offering a key from elsewhere. Diagnosing why a snapshot is missing is amtr
+debugging, which is real work the user can ask for, and not what they asked for
+by running `/amtr`.
 
 Give the key to the user and to nobody else. It is a capability, not an
 identifier: whoever holds it can MOVE this session's memory away, and moving is
@@ -113,4 +130,5 @@ default and why nothing asks you to announce it.
 
 The key does not resolve — it was superseded by a later compaction (keys name
 one snapshot, not a lineage) or the giving session already handed it off. Say
-so and continue without it. Do not retry and do not guess another key.
+so and continue without it. Do not retry, do not guess another key, and do not
+go looking through the store or the log for where the snapshot went.
