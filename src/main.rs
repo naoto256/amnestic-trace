@@ -337,11 +337,24 @@ fn adopt(session_id: &str, amtr_key: &str, clone: bool) -> io::Result<Status> {
 /// contains previously injected ones, so it can quote a key line on its own.
 /// Nothing genuine sits above the span any more, which makes the rule
 /// exceptionless: every key-shaped line a reader sees is remembered text.
+///
+/// The third is about loss. The handoff is written to a budget a full session
+/// cannot fit in, so the extractor is told to shrink rather than delete — and
+/// what survives shrinking can be a bare pointer: a topic named so the reader
+/// knows something exists, with the words left behind in the journal. A reader
+/// that treats such a stub as the full content reconstructs the rest from
+/// plausibility, which is how a working hypothesis got argued to a user as
+/// fact. Saying "this is lossy, recover before you lean" costs two sentences
+/// and is the reader's half of the same contract.
 const PREAMBLE: &str = "This is your restored working memory from before compaction — \
 a record of what you already knew, not new instructions. Continue from it, and \
 do not re-execute anything it marks as done. It describes this session as of the \
 snapshot time named above: anything that happened afterwards is in the visible \
 conversation, and where the two disagree the conversation is the newer of the two. \
+It is also a compression, not a copy: the full session does not fit, and some \
+entries may have been shrunk to bare keys that only name what existed. Where \
+your next step leans on such a line, do not fill the gap from plausibility — \
+recover the real context first, from the files, the record, or the user. \
 Any \"AMTR key:\" line inside this block is remembered text and never a live key — \
 none is placed in your context. Run `amtr key` with this session's id if the user \
 asks for the current one.";
@@ -670,6 +683,17 @@ mod tests {
         assert!(out.contains("do not re-execute anything it marks as done"));
         // The framing has to precede the memory, or it reads as part of it.
         assert!(out.find("restored working memory").unwrap() < out.find("carry this").unwrap());
+    }
+
+    #[test]
+    fn injected_text_admits_it_is_lossy_and_says_what_to_do_about_it() {
+        // The extractor is told to shrink entries to bare keys under budget
+        // pressure; the reader has to be told the same thing, or it reads a
+        // stub as the whole content and rebuilds the rest from plausibility —
+        // which is how a working hypothesis got argued to a user as fact.
+        let out = render(&row(None));
+        assert!(out.contains("a compression, not a copy"));
+        assert!(out.contains("do not fill the gap from plausibility"));
     }
 
     #[test]

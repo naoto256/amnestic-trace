@@ -11,6 +11,23 @@ explicit handoff to another session. What remains relevant is kept, the rest is
 dropped, and the result overwrites what came before — there is no history, no
 generations, and no shared memory.
 
+## What must survive
+
+Carrying everything that matters, in full, is the goal — and it is not
+attainable: the delivered memory is budgeted at about 2,000 tokens, and a
+working session does not reduce to that without loss. So the design commits to
+the next-best thing it can actually keep: **what cannot cross whole crosses as
+a key.** A topic named is enough for the waking session to know the thing
+existed and to go recover the words — from the journal, the repository, or the
+user.
+
+Compression is survivable; absence is not. A memory that leaves no fragment
+leaves nothing to even miss, so nothing ever triggers the recovery — which
+makes silent, total loss of a needed memory the one failure with no path back.
+Everything downstream is this ranking applied: the extraction prompt shrinks
+before it deletes and drops rulings last, and the injected preamble tells the
+reader its memory is lossy and where to go for the rest.
+
 ## Commands
 
 ```
