@@ -81,11 +81,12 @@ impl Store {
     /// The rows also carry each snapshot's key, which is the one thing here
     /// that is not in the journal the handoff was made from.
     ///
-    /// None of which makes this a boundary, and it should not be described as
-    /// one. A handoff is derived from a journal the host already wrote — on one
-    /// of the two hosts, world-readable — and anything running as this user can
-    /// read that journal directly. The mode is tidiness about an aggregate, not
-    /// protection from anyone.
+    /// What the 0700 mode covers: another OS user on the same machine cannot
+    /// read the aggregate. What it does not cover, and what a reader should
+    /// not rely on it for: it does not protect against processes running
+    /// under the same UID, nor can it strengthen permissions on the source
+    /// journal — those remain separate boundaries the store's mode has no
+    /// reach into.
     pub fn at(base: PathBuf) -> io::Result<Store> {
         // Created 0700 in the first place where the platform allows it, rather
         // than created then tightened — the latter leaves a brief window at the
