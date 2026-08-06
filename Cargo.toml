@@ -1,7 +1,7 @@
 [package]
 name = "amtr"
 version = "0.1.1"
-edition = "2021"
+edition = "2024"
 description = "Ephemeral replacement memory across a context boundary."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/naoto256/amnestic-trace"
