@@ -184,8 +184,8 @@ fn work(store: &Store, session_id: &str, journal: &Path) -> Result<String, extra
     // and it is deliberately the whole remedy — the alternative, refusing to
     // proceed, would leave the session with no memory at all rather than with
     // memory that starts over. A second path is quieter still: a
-    // `compacted_at` that does not parse leaves `journal::slice` with no
-    // boundary, so the window is the whole journal again with nothing said.
+    // `compacted_at` that does not parse leaves `journal::read_window` with
+    // no boundary, so the window is the whole journal again with nothing said.
     let prior = match store.load(session_id) {
         Ok(row) => row,
         Err(e) => {

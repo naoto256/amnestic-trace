@@ -429,6 +429,26 @@ mod tests {
         assert!(w.text.is_empty());
     }
 
+    /// Removes its directory on drop, so a panic after fixture setup cannot
+    /// leave a multi-megabyte scratch directory under the system temp path.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create tempdir");
+            Self(dir)
+        }
+        fn join(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn read_window_streams_a_journal_larger_than_would_fit_in_a_string() {
         // A prior version bailed out at 128 MiB because the file was read
@@ -436,8 +456,7 @@ mod tests {
         // window from a file well past that size, only holding the tail in
         // memory.
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("amtr-big-journal-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TempDir::new("amtr-big-journal");
         let path = dir.join("rollout.jsonl");
         {
             let mut w = std::io::BufWriter::new(std::fs::File::create(&path).expect("create"));
@@ -462,7 +481,6 @@ mod tests {
         assert!(bytes > 128 * 1024 * 1024, "test setup: file is {bytes} B");
 
         let w = read_window(&path, None).expect("read the streamed journal");
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(w.host, Host::Claude);
         // Tail preserved: the newest entry is the one being replaced.
@@ -494,9 +512,7 @@ mod tests {
     #[test]
     fn a_bad_utf8_line_skips_only_that_line_not_every_line_after() {
         use std::io::Write;
-        let dir =
-            std::env::temp_dir().join(format!("amtr-utf8-mid-journal-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TempDir::new("amtr-utf8-mid-journal");
         let path = dir.join("rollout.jsonl");
         {
             let mut w = std::io::BufWriter::new(std::fs::File::create(&path).expect("create"));
@@ -516,7 +532,6 @@ mod tests {
             ).expect("write suffix");
         }
         let w = read_window(&path, None).expect("read");
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(w.text.contains("before-fault"), "prefix lost: {}", w.text);
         assert!(
             w.text.contains("after-fault"),
@@ -532,9 +547,7 @@ mod tests {
     #[test]
     fn an_over_length_line_is_discarded_and_the_next_line_still_arrives() {
         use std::io::Write;
-        let dir =
-            std::env::temp_dir().join(format!("amtr-long-line-journal-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = TempDir::new("amtr-long-line-journal");
         let path = dir.join("rollout.jsonl");
         {
             let mut w = std::io::BufWriter::new(std::fs::File::create(&path).expect("create"));
@@ -557,7 +570,6 @@ mod tests {
             ).expect("write suffix");
         }
         let w = read_window(&path, None).expect("read");
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(w.text.contains("before-long"), "prefix lost: {}", w.text);
         assert!(
             w.text.contains("after-long"),
