@@ -3,6 +3,8 @@
 //! top-level RFC3339 `timestamp`, so one windowing path serves both; the format
 //! is only distinguished to pick which extraction agent to launch.
 
+use std::collections::VecDeque;
+use std::io::BufRead;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -30,34 +32,38 @@ pub struct Window {
 const MAX_ENTRY_CHARS: usize = 4_000;
 const MAX_WINDOW_CHARS: usize = 300_000;
 
-/// A journal larger than this is not read at all.
-///
-/// The per-entry and whole-window budgets below only apply *after* the file is
-/// in memory, so a long-running session could exhaust memory before any of them
-/// took effect — and being killed that way leaves nothing in the log either,
-/// because the process never reaches the point of writing one.
-const MAX_JOURNAL_BYTES: u64 = 128 * 1024 * 1024;
-
 pub fn read_window(path: &Path, since: Option<&str>) -> std::io::Result<Window> {
-    let size = std::fs::metadata(path)?.len();
-    if size > MAX_JOURNAL_BYTES {
-        return Err(std::io::Error::other(format!(
-            "journal is {size} bytes, over the {MAX_JOURNAL_BYTES}-byte ceiling; \
-             refusing to read it into memory"
-        )));
-    }
-    let raw = std::fs::read_to_string(path)?;
-    Ok(slice(&raw, since))
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    // Streamed line-by-line, not slurped: sessions live long enough to write
+    // journals of hundreds of megabytes, and `read_to_string` on that would
+    // exhaust memory before any per-entry or per-window budget could apply.
+    // Broken UTF-8 within a line is silently dropped by `map_while(Result::ok)`,
+    // which matches how a JSON parse error on that line would be handled below.
+    Ok(slice_lines(reader.lines().map_while(Result::ok), since))
 }
 
 /// Pure core, so the windowing rule is testable without a real transcript.
-pub fn slice(raw: &str, since: Option<&str>) -> Window {
+/// Test-only: production goes through `read_window` above, which streams.
+#[cfg(test)]
+pub(super) fn slice(raw: &str, since: Option<&str>) -> Window {
+    slice_lines(raw.lines().map(str::to_string), since)
+}
+
+fn slice_lines(lines: impl Iterator<Item = String>, since: Option<&str>) -> Window {
     let since = since.and_then(parse_ts);
     let mut host = None;
-    let mut entries: Vec<String> = Vec::new();
+    // Ring-bounded by cumulative character count rather than entry count, so
+    // memory stays under a small multiple of `MAX_WINDOW_CHARS` no matter how
+    // large the source journal is. Only the tail survives the final cap
+    // anyway, so anything older than the tail's worth is safe to drop early.
+    let cap = MAX_WINDOW_CHARS * 2;
+    let mut entries: VecDeque<String> = VecDeque::new();
+    let mut entries_chars: usize = 0;
     let mut last_ts: Option<String> = None;
+    let mut dropped_something = false;
 
-    for line in raw.lines() {
+    for line in lines {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -82,20 +88,32 @@ pub fn slice(raw: &str, since: Option<&str>) -> Window {
         }
         last_ts = Some(ts_raw.to_string());
         if let Some(rendered) = render(&v) {
-            entries.push(rendered);
+            entries_chars += rendered.chars().count();
+            entries.push_back(rendered);
+            while entries_chars > cap
+                && let Some(front) = entries.pop_front()
+            {
+                entries_chars -= front.chars().count();
+                dropped_something = true;
+            }
         }
     }
 
-    let mut text = entries.join("\n\n");
-    if text.chars().count() > MAX_WINDOW_CHARS {
+    let joined: String = entries.into_iter().collect::<Vec<_>>().join("\n\n");
+    let text = if joined.chars().count() > MAX_WINDOW_CHARS {
         // Keep the tail: the newest turns are the ones being replaced.
-        let cut = text
+        let cut = joined
             .char_indices()
-            .nth(text.chars().count() - MAX_WINDOW_CHARS)
+            .nth(joined.chars().count() - MAX_WINDOW_CHARS)
             .map(|(i, _)| i)
             .unwrap_or(0);
-        text = format!("[... earlier entries dropped ...]\n{}", &text[cut..]);
-    }
+        format!("[... earlier entries dropped ...]\n{}", &joined[cut..])
+    } else if dropped_something {
+        // Under the tail cap now, but earlier entries were shed at read time.
+        format!("[... earlier entries dropped ...]\n{joined}")
+    } else {
+        joined
+    };
 
     Window {
         host: host.unwrap_or(Host::Claude),
@@ -290,5 +308,62 @@ mod tests {
     fn unparseable_lines_are_skipped_not_fatal() {
         let w = slice("garbage\n{\"timestamp\":\"nope\"}\n", None);
         assert!(w.text.is_empty());
+    }
+
+    #[test]
+    fn read_window_streams_a_journal_larger_than_would_fit_in_a_string() {
+        // A prior version bailed out at 128 MiB because the file was read
+        // whole into a String. The streaming reader should produce a bounded
+        // window from a file well past that size, only holding the tail in
+        // memory.
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("amtr-big-journal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rollout.jsonl");
+        {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&path).expect("create"));
+            // ~1 KiB of ignorable padding on each line; the last field is what
+            // the harvester keeps, so the window still fits in MAX_WINDOW_CHARS.
+            let filler = "x".repeat(950);
+            // 200_000 lines * ~1 KiB > 128 MiB by enough that the streaming
+            // path is the only one that could reach the end.
+            for i in 0..200_000u32 {
+                writeln!(
+                    w,
+                    r#"{{"timestamp":"2026-01-01T00:{:02}:{:02}.000Z","sessionId":"s","type":"user","message":{{"role":"user","content":"entry {} {}"}}}}"#,
+                    (i / 60) % 60,
+                    i % 60,
+                    i,
+                    filler
+                )
+                .expect("write");
+            }
+        }
+        let bytes = std::fs::metadata(&path).expect("meta").len();
+        assert!(bytes > 128 * 1024 * 1024, "test setup: file is {bytes} B");
+
+        let w = read_window(&path, None).expect("read the streamed journal");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(w.host, Host::Claude);
+        // Tail preserved: the newest entry is the one being replaced.
+        assert!(
+            w.text.contains("entry 199999"),
+            "the tail of the journal did not survive the window: got {} chars",
+            w.text.chars().count()
+        );
+        // If the filter kept the whole file, we would have gigabytes of text
+        // here rather than the tail cap. The read-time ring bound is what
+        // keeps this from happening; without it, `since=None` on a large
+        // journal blows up memory even though the streaming reader itself is
+        // fine — filtered content past `MAX_WINDOW_CHARS` * 2 must be shed.
+        assert!(
+            w.text.chars().count()
+                <= MAX_WINDOW_CHARS + "[... earlier entries dropped ...]\n".len(),
+            "window not bounded: {} chars",
+            w.text.chars().count()
+        );
+        assert!(w.text.contains("earlier entries dropped"));
+        assert!(w.last_ts.is_some());
     }
 }
