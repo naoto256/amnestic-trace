@@ -71,8 +71,10 @@ pub(super) fn slice(raw: &str, since: Option<&str>) -> Window {
 /// - **utf-8 or over-length line**: drop the record, yield the next. The
 ///   reader has been advanced past the newline so the fault is local; skipping
 ///   one record matches the existing JSON-parse-error branch in `slice_lines`.
-/// - **`ErrorKind::Interrupted`**: retry, once per record. `BufReader` handles
-///   most EINTR internally, but nothing forbids it surfacing here.
+/// - **`ErrorKind::Interrupted`**: retry in place for the current record —
+///   that is the one I/O error kind whose contract is "no progress; ask
+///   again". `BufReader` handles most EINTR internally, but nothing forbids
+///   it surfacing here.
 /// - **other I/O errors**: yield `Err`, then terminate. The caller sees the
 ///   error and can refuse to write a snapshot from a partial read; and the
 ///   iterator does not spin on a permanently failing reader.
