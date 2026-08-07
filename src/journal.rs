@@ -32,25 +32,141 @@ pub struct Window {
 const MAX_ENTRY_CHARS: usize = 4_000;
 const MAX_WINDOW_CHARS: usize = 300_000;
 
+/// Per-line ceiling for the byte reader. A journal record with no newline for
+/// more than this is discarded rather than allocated. Generous by design: real
+/// entries include tool output that can run to megabytes, but they end at some
+/// newline; anything past this is either the file itself missing a terminator
+/// or an entry so oversized that the extractor could not do anything with it
+/// anyway. The rendered form is bounded separately by `MAX_ENTRY_CHARS`.
+const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
+
 pub fn read_window(path: &Path, since: Option<&str>) -> std::io::Result<Window> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
     // Streamed line-by-line, not slurped: sessions live long enough to write
     // journals of hundreds of megabytes, and `read_to_string` on that would
     // exhaust memory before any per-entry or per-window budget could apply.
-    // Broken UTF-8 within a line is silently dropped by `map_while(Result::ok)`,
-    // which matches how a JSON parse error on that line would be handled below.
-    Ok(slice_lines(reader.lines().map_while(Result::ok), since))
+    // A byte-oriented reader is used rather than `BufRead::lines()` so a single
+    // journal record cannot allocate past `MAX_LINE_BYTES` before the loop's
+    // per-entry cap or the ring below get a chance. Each yielded line is a
+    // `Result` so a real I/O error surfaces to the caller — dropping it into
+    // a partial `Ok(Window)` would let the extractor produce a snapshot that
+    // silently omits the tail, which is the failure mode this rewrite exists
+    // to prevent.
+    slice_lines(bounded_lines(reader), since)
 }
 
 /// Pure core, so the windowing rule is testable without a real transcript.
 /// Test-only: production goes through `read_window` above, which streams.
 #[cfg(test)]
 pub(super) fn slice(raw: &str, since: Option<&str>) -> Window {
-    slice_lines(raw.lines().map(str::to_string), since)
+    slice_lines(raw.lines().map(|s| Ok(s.to_string())), since)
+        .expect("in-memory slice cannot produce an io::Error")
 }
 
-fn slice_lines(lines: impl Iterator<Item = String>, since: Option<&str>) -> Window {
+/// Yields one utf-8 line at a time, bounded by `MAX_LINE_BYTES`.
+///
+/// Faults are handled by kind:
+///
+/// - **utf-8 or over-length line**: drop the record, yield the next. The
+///   reader has been advanced past the newline so the fault is local; skipping
+///   one record matches the existing JSON-parse-error branch in `slice_lines`.
+/// - **`ErrorKind::Interrupted`**: retry, once per record. `BufReader` handles
+///   most EINTR internally, but nothing forbids it surfacing here.
+/// - **other I/O errors**: yield `Err`, then terminate. The caller sees the
+///   error and can refuse to write a snapshot from a partial read; and the
+///   iterator does not spin on a permanently failing reader.
+fn bounded_lines(
+    mut reader: impl BufRead + 'static,
+) -> impl Iterator<Item = std::io::Result<String>> {
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        loop {
+            buf.clear();
+            match read_bounded_line(&mut reader, &mut buf, MAX_LINE_BYTES) {
+                LineOutcome::Eof => {
+                    done = true;
+                    return None;
+                }
+                LineOutcome::Ok => match std::str::from_utf8(&buf) {
+                    Ok(s) => return Some(Ok(s.to_string())),
+                    Err(_) => continue, // per-record drop
+                },
+                LineOutcome::TooLong => continue, // per-record drop
+                LineOutcome::Io(e) => {
+                    done = true;
+                    return Some(Err(e));
+                }
+            }
+        }
+    })
+}
+
+enum LineOutcome {
+    Ok,
+    Eof,
+    TooLong,
+    Io(std::io::Error),
+}
+
+/// Reads bytes into `buf` up to and including the next newline. If the line
+/// would exceed `cap`, `buf` is cleared and the rest of the line is drained
+/// from the reader so the next call starts on a fresh record.
+///
+/// `ErrorKind::Interrupted` is retried in place — that is the one I/O error
+/// kind whose contract is "no progress was made, ask again". Every other I/O
+/// error is returned to the caller.
+fn read_bounded_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, cap: usize) -> LineOutcome {
+    let mut over = false;
+    let mut got_anything = false;
+    loop {
+        let chunk = match reader.fill_buf() {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return LineOutcome::Io(e),
+        };
+        if chunk.is_empty() {
+            if !got_anything {
+                return LineOutcome::Eof;
+            }
+            return if over {
+                LineOutcome::TooLong
+            } else {
+                LineOutcome::Ok
+            };
+        }
+        got_anything = true;
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if !over {
+            if buf.len() + take > cap {
+                over = true;
+                buf.clear();
+            } else {
+                buf.extend_from_slice(&chunk[..take]);
+            }
+        }
+        reader.consume(take);
+        if done {
+            return if over {
+                LineOutcome::TooLong
+            } else {
+                LineOutcome::Ok
+            };
+        }
+    }
+}
+
+fn slice_lines(
+    lines: impl Iterator<Item = std::io::Result<String>>,
+    since: Option<&str>,
+) -> std::io::Result<Window> {
     let since = since.and_then(parse_ts);
     let mut host = None;
     // Ring-bounded by cumulative character count rather than entry count, so
@@ -64,6 +180,7 @@ fn slice_lines(lines: impl Iterator<Item = String>, since: Option<&str>) -> Wind
     let mut dropped_something = false;
 
     for line in lines {
+        let line = line?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -115,11 +232,11 @@ fn slice_lines(lines: impl Iterator<Item = String>, since: Option<&str>) -> Wind
         joined
     };
 
-    Window {
+    Ok(Window {
         host: host.unwrap_or(Host::Claude),
         text,
         last_ts,
-    }
+    })
 }
 
 /// Codex rollout lines wrap everything in `payload`; Claude Code transcript
@@ -365,5 +482,239 @@ mod tests {
         );
         assert!(w.text.contains("earlier entries dropped"));
         assert!(w.last_ts.is_some());
+    }
+
+    /// Half the entry line is replaced with invalid UTF-8. The reader must
+    /// keep going: dropping every entry after a bad line was the earlier
+    /// mistake — `map_while(Result::ok)` on `BufRead::lines()` terminates the
+    /// iterator on the first `Err`, so a UTF-8 or transient I/O fault
+    /// silently truncated the tail. The tail must survive here.
+    #[test]
+    fn a_bad_utf8_line_skips_only_that_line_not_every_line_after() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("amtr-utf8-mid-journal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rollout.jsonl");
+        {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&path).expect("create"));
+            writeln!(
+                w,
+                r#"{{"timestamp":"2026-01-01T00:00:00.000Z","sessionId":"s","type":"user","message":{{"role":"user","content":"before-fault"}}}}"#
+            ).expect("write prefix");
+            // A single line with an invalid UTF-8 sequence — 0xFF is never
+            // valid in utf-8 — then newline.
+            w.write_all(
+                b"{\"timestamp\":\"2026-01-01T00:00:01.000Z\",\"content\":\"\xff\xff\xff\"}\n",
+            )
+            .expect("write fault");
+            writeln!(
+                w,
+                r#"{{"timestamp":"2026-01-01T00:00:02.000Z","sessionId":"s","type":"user","message":{{"role":"user","content":"after-fault"}}}}"#
+            ).expect("write suffix");
+        }
+        let w = read_window(&path, None).expect("read");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(w.text.contains("before-fault"), "prefix lost: {}", w.text);
+        assert!(
+            w.text.contains("after-fault"),
+            "tail lost — a fault mid-file silently truncated: {}",
+            w.text
+        );
+    }
+
+    /// One record grows past `MAX_LINE_BYTES` and a small valid record
+    /// follows it. The oversized record is discarded — allocating it would be
+    /// exactly the read-time OOM the ring bound is supposed to prevent —
+    /// and the following record survives.
+    #[test]
+    fn an_over_length_line_is_discarded_and_the_next_line_still_arrives() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("amtr-long-line-journal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rollout.jsonl");
+        {
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&path).expect("create"));
+            writeln!(
+                w,
+                r#"{{"timestamp":"2026-01-01T00:00:00.000Z","sessionId":"s","type":"user","message":{{"role":"user","content":"before-long"}}}}"#
+            ).expect("write prefix");
+            // One line just past MAX_LINE_BYTES (32 MiB). Written in chunks
+            // so the test does not allocate the whole line in one go itself.
+            w.write_all(b"{\"timestamp\":\"2026-01-01T00:00:01.000Z\",\"content\":\"")
+                .expect("start");
+            let chunk = vec![b'a'; 1024 * 1024];
+            for _ in 0..33 {
+                w.write_all(&chunk).expect("chunk");
+            }
+            w.write_all(b"\"}\n").expect("close");
+            writeln!(
+                w,
+                r#"{{"timestamp":"2026-01-01T00:00:02.000Z","sessionId":"s","type":"user","message":{{"role":"user","content":"after-long"}}}}"#
+            ).expect("write suffix");
+        }
+        let w = read_window(&path, None).expect("read");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(w.text.contains("before-long"), "prefix lost: {}", w.text);
+        assert!(
+            w.text.contains("after-long"),
+            "tail lost — an over-length record silently truncated: {}",
+            w.text
+        );
+        // The over-length record must not be represented as its filler
+        // content; a naive read would have `aaaa...` in the window.
+        assert!(
+            !w.text.contains("aaaaaaaaaaaa"),
+            "over-length record leaked into the window"
+        );
+    }
+
+    /// A reader whose `fill_buf` fails a bounded number of times before
+    /// yielding EOF. Bounded so the wrong policy — retry on I/O error —
+    /// still terminates the test in finite time, and the difference shows
+    /// up as a call count rather than a wall-clock hang.
+    struct FailNTimesThenEof {
+        remaining_errs: usize,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::io::Read for FailNTimesThenEof {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            unreachable!("BufRead::fill_buf is what bounded_lines calls")
+        }
+    }
+
+    impl BufRead for FailNTimesThenEof {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.remaining_errs > 0 {
+                self.remaining_errs -= 1;
+                Err(std::io::Error::other("transient"))
+            } else {
+                Ok(&[])
+            }
+        }
+        fn consume(&mut self, _: usize) {}
+    }
+
+    /// The iterator must yield the error rather than swallow it, and it must
+    /// terminate on the first `Io` — retrying would spin `fill_buf` at 100%
+    /// CPU on a permanently failing reader.
+    #[test]
+    fn a_read_error_surfaces_and_terminates_the_iterator() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reader = FailNTimesThenEof {
+            remaining_errs: 10_000,
+            calls: Arc::clone(&calls),
+        };
+        let produced: Vec<_> = bounded_lines(reader).collect();
+        assert_eq!(produced.len(), 1, "expected exactly one Err item");
+        assert!(produced[0].is_err(), "the item must be Err(_)");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "fill_buf must be called exactly once — more means the iterator \
+             was retrying on I/O error and would spin on a persistent fault"
+        );
+    }
+
+    /// A valid prefix followed by an I/O error must cause `read_window` (via
+    /// `slice_lines`) to return `Err`, not an `Ok(Window)` with the prefix
+    /// silently truncated. Falling back to partial success recreates the
+    /// original truncation defect.
+    #[test]
+    fn a_valid_prefix_then_io_error_propagates_as_err_not_partial_ok() {
+        struct PrefixThenFail {
+            prefix: Vec<u8>,
+            pos: usize,
+            failed: bool,
+        }
+        impl std::io::Read for PrefixThenFail {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!("fill_buf is what bounded_lines calls")
+            }
+        }
+        impl BufRead for PrefixThenFail {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.pos < self.prefix.len() {
+                    Ok(&self.prefix[self.pos..])
+                } else if !self.failed {
+                    self.failed = true;
+                    Err(std::io::Error::other("disk fault"))
+                } else {
+                    Ok(&[])
+                }
+            }
+            fn consume(&mut self, n: usize) {
+                self.pos = self.pos.saturating_add(n).min(self.prefix.len());
+            }
+        }
+
+        let prefix = br#"{"timestamp":"2026-01-01T00:00:00.000Z","sessionId":"s","type":"user","message":{"role":"user","content":"before-fault"}}
+"#.to_vec();
+        let reader = PrefixThenFail {
+            prefix,
+            pos: 0,
+            failed: false,
+        };
+        let outcome = slice_lines(bounded_lines(reader), None);
+        assert!(
+            outcome.is_err(),
+            "expected Err: got Ok(Window) with text {:?}",
+            outcome.as_ref().map(|w| &w.text).ok()
+        );
+    }
+
+    /// A one-off `ErrorKind::Interrupted` on `fill_buf` must not lose the
+    /// following line — it is the one error kind whose contract is "no
+    /// progress; retry" and `read_bounded_line` handles it in place.
+    #[test]
+    fn interrupted_is_retried_not_treated_as_a_permanent_read_error() {
+        struct InterruptOnce {
+            data: Vec<u8>,
+            pos: usize,
+            interrupted: bool,
+        }
+        impl std::io::Read for InterruptOnce {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!("fill_buf is what bounded_lines calls")
+            }
+        }
+        impl BufRead for InterruptOnce {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "eintr",
+                    ))
+                } else if self.pos < self.data.len() {
+                    Ok(&self.data[self.pos..])
+                } else {
+                    Ok(&[])
+                }
+            }
+            fn consume(&mut self, n: usize) {
+                self.pos = self.pos.saturating_add(n).min(self.data.len());
+            }
+        }
+
+        let data = br#"{"timestamp":"2026-01-01T00:00:00.000Z","sessionId":"s","type":"user","message":{"role":"user","content":"after-eintr"}}
+"#.to_vec();
+        let reader = InterruptOnce {
+            data,
+            pos: 0,
+            interrupted: false,
+        };
+        let w = slice_lines(bounded_lines(reader), None).expect("Interrupted must be retried");
+        assert!(
+            w.text.contains("after-eintr"),
+            "the line following an Interrupted was lost: {}",
+            w.text
+        );
     }
 }
