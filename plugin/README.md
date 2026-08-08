@@ -12,15 +12,22 @@ session.
   Hands the journal path to `amtr synthesize`, which records an undelivered
   snapshot and detaches a worker before returning. Extraction therefore runs in
   parallel with compaction itself rather than delaying it.
+- **`SessionStart` hook, matched to `compact`**
+  (`tools/amtr-hook.sh deliver SessionStart`). Fires the instant a compaction
+  ends, which is the earliest anything can be injected — `PreCompact` cannot
+  inject on either host, and would have nothing to inject if it could, since the
+  extraction has only just been handed its input. Extraction runs beside the
+  compaction, so the two race; when extraction wins, the memory lands here,
+  before the resumed session does anything else. When it does not, this hook
+  waits on the shared window below rather than abandoning the debt.
 - **`PreToolUse` hook** (`tools/amtr-hook.sh deliver`). Delivers the snapshot at
-  the first tool call after it is ready. Compaction happens mid-turn and no host
-  can inject from a compaction hook, so something has to carry the memory
-  forward; this is the earliest thing that runs. If extraction is still in
-  flight it waits — but on a budget of 25s per compaction, shared by every tool
-  call in the stretch, not 25s per call. The first call to find the extraction
-  unfinished records a deadline next to the marker; calls arriving before it
-  wait alongside, calls arriving after step aside. Either way the debt itself is
-  left standing: abandoning it is the backstop's decision, not this hook's.
+  the first tool call after it is ready, for the stretch where the session keeps
+  working and the user has not spoken again. If extraction is still in flight it
+  waits — but on a budget of 25s per compaction, shared by every hook in the
+  stretch, not 25s per call. The first to find the extraction unfinished records
+  a deadline next to the marker; arrivals before it wait alongside, arrivals
+  after step aside. Either way the debt itself is left standing: abandoning it
+  is the backstop's decision, not this hook's.
 - **`UserPromptSubmit` hook** (`tools/amtr-hook.sh recall`). The backstop, for
   turns that call no tools at all. It waits while extraction is still running
   and gives up after 25s, injecting nothing and clearing the marker so later
@@ -34,9 +41,9 @@ session.
   reading back this session's own key. Compaction inside one session needs no
   key and no skill.
 
-The two delivering hooks fire on the same turn once a snapshot is ready, and so
-do concurrent tool calls — the tool-call hook wakes every waiter on one shared
-deadline, so they reach the ready claim together by design. The marker is what
+The three delivering hooks can fire on the same turn once a snapshot is ready,
+and so do concurrent tool calls — the shared deadline wakes every waiter at
+once, so they reach the ready claim together by design. The marker is what
 stops the memory being injected twice, but it has to be taken *before* the
 injection to do that: whoever gets there first renames it out of everyone else's
 reach, which exactly one caller can win, and only that one delivers. Discharging

@@ -1,6 +1,6 @@
 [package]
 name = "amtr"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Ephemeral replacement memory across a context boundary."
 license = "MIT OR Apache-2.0"

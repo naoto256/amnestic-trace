@@ -1,25 +1,32 @@
 #!/bin/sh
 # Amnestic Trace hook entry point for both Claude Code and Codex.
 #
-#   amtr-hook.sh precompact   <- PreCompact:        start a detached synthesize
-#   amtr-hook.sh deliver      <- PreToolUse:        inject at the first tool call
-#   amtr-hook.sh recall       <- UserPromptSubmit:  inject at the next turn start
+#   amtr-hook.sh precompact              <- PreCompact:       detach a synthesize
+#   amtr-hook.sh deliver SessionStart    <- SessionStart:     inject as compaction ends
+#   amtr-hook.sh deliver                 <- PreToolUse:       inject at the first tool call
+#   amtr-hook.sh recall                  <- UserPromptSubmit: inject at the next turn start
 #
-# PreCompact/PostCompact hooks cannot inject context on either host, so the
-# post-compaction half is realized later, and "later" is the whole problem this
-# has two deliverers for. A compaction fires mid-turn; the session then keeps
-# working, sometimes for half an hour, and `UserPromptSubmit` does not run again
-# until the user says something. Everything done in between is missing from a
-# memory that was accurate when it was taken. `PreToolUse` runs throughout that
-# stretch, so it delivers first and the turn-start hook becomes the backstop for
-# turns that call no tools at all.
+# `PreCompact` cannot inject context on either host, and has nothing to inject
+# if it could: the extraction has only just been handed its input. So the
+# post-compaction half falls to the hooks that run afterwards, and which one
+# lands it decides how stale the memory is.
+#
+# `SessionStart` matched to compact is the earliest of them — it fires the
+# instant a compaction ends, and both hosts take context from it. It carries the
+# memory whenever the extraction beat the compaction they were racing.
+#
+# Otherwise the session resumes and keeps working, sometimes for half an hour,
+# and `UserPromptSubmit` does not run again until the user says something.
+# Everything done in between is missing from a memory that was accurate when it
+# was taken. `PreToolUse` runs throughout that stretch, so it delivers next and
+# the turn-start hook is the backstop for turns that call no tools at all.
 #
 # Whichever arrives first discharges the marker, and the marker is what keeps
-# the other from delivering it twice. Both will wait up to 25s for an
+# the others from delivering it again. All three will wait up to 25s for an
 # extraction still in flight, but they spend that budget differently: the
 # turn-start hook has one chance per turn and spends it on every turn it runs,
-# while the tool-call hook spends one budget per compaction, shared by every
-# tool call in the stretch that follows it.
+# while the other two share one budget per compaction across every hook in the
+# stretch that follows it.
 #
 # Every path exits 0 with no stdout unless there is something to inject: the
 # hook must never be the reason a turn fails.
@@ -220,8 +227,18 @@ precompact)
 	amtr synthesize "$session_id" "$journal" >/dev/null 2>>"$log"
 	;;
 deliver)
-	# PreToolUse. Runs many times a turn, so it does nothing but look at one
-	# file unless a snapshot is actually owed.
+	# Two callers share this branch: PreToolUse, many times a turn, and
+	# SessionStart matched to compact, once right after a compaction ends. The
+	# second argument names which, because the JSON handed back carries the
+	# event name and a hook that named the wrong one would have its output
+	# discarded by the host — silently, on the delivering path.
+	#
+	# Runs often, so it does nothing but look at one file unless a snapshot is
+	# actually owed.
+	# Named apart from `$event`, which holds the subcommand this script was
+	# dispatched on. One of them chooses the branch and the other travels into
+	# the handoff; a single name doing both is a name waiting to be reused wrong.
+	hook_event=${2:-PreToolUse}
 	[ -f "$marker" ] || exit 0
 
 	claim=$(cat "$marker" 2>/dev/null)
@@ -303,7 +320,7 @@ deliver)
 	*) exit 0 ;;
 	esac
 
-	deliver_claim PreToolUse "$claim"
+	deliver_claim "$hook_event" "$claim"
 	;;
 recall)
 	# The marker is an undelivered snapshot, not a "compaction happened" flag.
@@ -313,11 +330,9 @@ recall)
 
 	# The poll budget is 25s, spent per turn: this hook runs once a turn and a
 	# turn that misses the memory runs without it entirely. Contrast the
-	# tool-call deliverer above, which spends 25s per compaction across all the
-	# tool calls that follow it. hooks/claude.json declares a 35s timeout around
-	# both, leaving room for the read that follows; hooks/codex.json declares
-	# none, because the unit of that field is unverified on Codex and a wrong
-	# guess would kill the hook outright rather than fail visibly.
+	# deliverers above, which spend 25s per compaction across every hook that
+	# follows it. Both hook files declare a 35s timeout around the waiting
+	# paths, leaving room for the read that follows the wait.
 	waited=0
 	while [ "$waited" -lt 25 ]; do
 		case "$(cat "$marker" 2>/dev/null)" in

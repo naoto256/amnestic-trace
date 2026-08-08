@@ -100,13 +100,15 @@ STUB
 	chmod +x "$work/bin/amtr"
 }
 
-# `$sh` is the shell under test, not the one running this file.
+# `$sh` is the shell under test, not the one running this file. The optional
+# second argument is the event name the deliver branch takes, exactly as the
+# hook declarations pass it.
 feed() {
-	env HOME="$work" PATH="$work/bin:$PATH" "$sh" "$hook" "$1" 2>/dev/null
+	env HOME="$work" PATH="$work/bin:$PATH" "$sh" "$hook" "$1" ${2:+"$2"} 2>/dev/null
 }
 
 run_hook() {
-	printf '{"session_id":"%s","prompt":"hi"}' "${2:-sess1}" | feed "$1"
+	printf '{"session_id":"%s","prompt":"hi"}' "${2:-sess1}" | feed "$1" "${3:-}"
 }
 
 marker_now() {
@@ -238,6 +240,30 @@ cases() {
 	wait 2>/dev/null || true
 	check "concurrent waiters deliver the snapshot exactly once" \
 		"$(cat "$work"/race.* 2>/dev/null | grep -c DELIVERED)" "1"
+
+	# The compaction-end deliverer is the same branch under a different event
+	# name, and the name is the part that can silently break: the JSON handed
+	# back carries it, and a host given the wrong one discards the output while
+	# the hook believes it delivered.
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	check "the compaction-end hook delivers under its own event name" \
+		"$(run_hook deliver sess1 SessionStart)" "DELIVERED:sess1:SessionStart:amtr-k1"
+	check "  and then discharged" "$(marker_now)" "GONE"
+
+	# The compaction-end hook and a tool call can be waiting out the same
+	# extraction — that is the normal case when compaction ends mid-turn. They
+	# share one window and one claim, so exactly one of them injects.
+	fresh
+	printf 'ongoing' >"$marker"
+	deadline_at 10
+	run_hook deliver sess1 SessionStart >"$work/mixed.1" 2>/dev/null &
+	run_hook deliver >"$work/mixed.2" 2>/dev/null &
+	sleep 2
+	publish_claim 'ready:amtr-k1'
+	wait 2>/dev/null || true
+	check "a compaction-end waiter and a tool-call waiter deliver exactly once" \
+		"$(cat "$work"/mixed.* 2>/dev/null | grep -c DELIVERED)" "1"
 
 	# Nobody has waited yet, so this tool call opens the window. Checked from
 	# outside because the hook is still sitting in it.
