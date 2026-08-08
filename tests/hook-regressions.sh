@@ -50,6 +50,17 @@ spend_budget() {
 	deadline_at -60
 }
 
+# Waits for a hook to signal that it has reached the point a case wants to
+# interfere with. A sleep long enough to be safe on a loaded machine is a slow
+# suite; one short enough to keep the suite quick is a flake.
+await_file() {
+	waited=0
+	while [ ! -f "$1" ] && [ "$waited" -lt 50 ]; do
+		sleep 0.1 2>/dev/null || sleep 1
+		waited=$((waited + 1))
+	done
+}
+
 budget_shape() {
 	case "$1" in
 	'' | *[!0-9]*) printf 'absent-or-malformed' ;;
@@ -292,26 +303,82 @@ cases() {
 
 	# Sweeping means a claim can vanish from under a delivery that is still
 	# running, and that delivery still tries to put it back when it fails. There
-	# is nothing to put back, and restoring nothing is worse than restoring
-	# nothing quietly: the redirect opens the marker before `cat` reads, so it
-	# would leave an empty marker — a debt naming no snapshot, which every later
-	# hook sees and none can discharge. Driven through the real path, with a
-	# delivery slow enough to be swept while it runs.
+	# is nothing to put back, and the marker must not appear anyway. The sweep
+	# is timed against a signal from the delivery rather than a sleep, so it
+	# lands inside the window on a loaded machine instead of before it.
 	fresh
 	printf 'ready:amtr-k1' >"$marker"
-	cat >"$work/bin/amtr" <<'STUB'
+	cat >"$work/bin/amtr" <<STUB
 #!/bin/sh
+: >"$work/recall-entered"
 sleep 2
 exit 1
 STUB
 	chmod +x "$work/bin/amtr"
 	run_hook deliver >/dev/null 2>&1 &
 	hook_pid=$!
-	sleep 1
+	await_file "$work/recall-entered"
 	rm -f "$marker".delivering.*
 	wait 2>/dev/null || true
 	check "a claim swept mid-delivery is not restored as an empty marker" \
 		"$(marker_now)" "GONE"
+	stub
+
+	# A claim held for delivery is superseded if a compaction lands while the
+	# delivery runs, so returning it must not displace what took its place.
+	# This is the other half of what the restore has to get right, and it is
+	# the half that stops an older snapshot outliving the one that replaced it.
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	cat >"$work/bin/amtr" <<STUB
+#!/bin/sh
+: >"$work/recall-entered"
+sleep 2
+exit 1
+STUB
+	chmod +x "$work/bin/amtr"
+	run_hook deliver >/dev/null 2>&1 &
+	hook_pid=$!
+	await_file "$work/recall-entered"
+	printf 'ready:amtr-k2' >"$marker"
+	wait 2>/dev/null || true
+	check "a failed delivery does not put its claim back over a newer one" \
+		"$(marker_now)" "ready:amtr-k2"
+	stub
+
+	# The window a check cannot close. A restore that tests the claim and then
+	# copies it has a gap between the two, and the redirect creates the marker
+	# before the copy learns its input is gone — so a sweep landing in that gap
+	# produces the empty marker the test was meant to prevent. Reached
+	# deterministically rather than by racing: a `cat` that removes the claim
+	# the second time it is asked to read one stands in for the sweep, the
+	# first read being the delivery's own identity check.
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	cat >"$work/bin/amtr" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+	chmod +x "$work/bin/amtr"
+	cat >"$work/bin/cat" <<CATW
+#!/bin/sh
+case "\${1:-}" in
+*.delivering.*)
+	if [ -f "$work/claim-read" ]; then
+		rm -f "\$1"
+	else
+		: >"$work/claim-read"
+	fi
+	;;
+esac
+exec /bin/cat "\$@"
+CATW
+	chmod +x "$work/bin/cat"
+	run_hook deliver >/dev/null 2>&1
+	rm -f "$work/bin/cat"
+	check "a claim lost between testing it and reading it leaves no empty marker" \
+		"$(if [ -f "$marker" ] && [ ! -s "$marker" ]; then echo empty; else echo "not-empty"; fi)" \
+		"not-empty"
 	stub
 
 	# And a delivered debt takes its window with it, so the next compaction
