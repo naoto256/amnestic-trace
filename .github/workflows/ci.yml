@@ -133,6 +133,38 @@ jobs:
             test -f "plugin/${rel#./}" || { echo "missing: $manifest -> $rel"; exit 1; }
           done
 
+      # The compaction-end deliverer is declared, not discovered. Its matcher
+      # selects which SessionStart it answers, and the event name it is handed
+      # becomes the `hookEventName` the host is asked to accept — so a typo in
+      # either one leaves valid JSON, an installed hook, and no delivery, with
+      # nothing anywhere reporting a hook that was never invoked. The shell
+      # regressions cannot reach this: they call the script themselves and
+      # supply the argument they are checking.
+      - name: The compaction-end deliverer is declared as such
+        run: |
+          for f in plugin/hooks/claude.json plugin/hooks/codex.json; do
+            python3 - "$f" <<'PY'
+          import json, sys
+
+          path = sys.argv[1]
+          entries = json.load(open(path))["hooks"]["SessionStart"]
+          if len(entries) != 1:
+              sys.exit(f"{path}: expected one SessionStart entry, found {len(entries)}")
+
+          entry = entries[0]
+          if entry["matcher"] != "compact":
+              sys.exit(f"{path}: SessionStart matcher is {entry['matcher']!r}, not 'compact'")
+
+          hooks = entry["hooks"]
+          if len(hooks) != 1:
+              sys.exit(f"{path}: expected one SessionStart hook, found {len(hooks)}")
+
+          command = hooks[0]["command"]
+          if not command.endswith(" deliver SessionStart"):
+              sys.exit(f"{path}: SessionStart command does not end in 'deliver SessionStart': {command!r}")
+          PY
+          done
+
       # The version appears in three places and they are read by three
       # different consumers; a release tagged against a stale one installs the
       # wrong thing.

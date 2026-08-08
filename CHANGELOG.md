@@ -48,12 +48,20 @@ declares one, in the shape the documentation describes.
 Only fields that state something true about this plugin are set: display name,
 short and long description, developer, category, and the repository URL. There
 are no icons or screenshots to point at, so those are left out rather than
-filled in. `capabilities` is omitted for a different reason: no set of allowed
-values is documented anywhere, and a field whose vocabulary is unknown is better
-absent than guessed at.
+filled in. `capabilities` is omitted for a different reason: the available
+manifest reference does not document an allowed-value vocabulary, and a field
+whose vocabulary is unknown is better absent than guessed at.
 
 The top-level manifest also gains `homepage`, `repository`, `license`, and
-`keywords`, matching what the bundled manifests carry.
+`keywords`.
+
+CI now asserts that both hook files declare the compaction-end deliverer with
+the matcher and event name it needs. The shell regressions cannot cover that:
+they invoke the script themselves and pass the event name they are checking, so
+they prove the script honours its argument and say nothing about what the
+manifests hand it. A typo on that side leaves valid JSON and an installed hook
+that is simply never the one asked for — and a hook that is never invoked
+cannot report that it was skipped.
 
 ## [0.1.3] - 2026-08-08
 
