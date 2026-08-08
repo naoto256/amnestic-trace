@@ -25,18 +25,24 @@ session.
   turns that call no tools at all. It waits while extraction is still running
   and gives up after 25s, injecting nothing and clearing the marker so later
   turns do not sit through the poll again. Its budget is per turn, because it
-  only runs once a turn. On the delivering path the marker is cleared only once
+  only runs once a turn. On the delivering path the claim is dropped only once
   `amtr recall` reports that it actually printed a handoff — exit 0 means
-  delivered, 1 means nothing was.
+  delivered, 1 means nothing was, and a claim that delivered nothing is put
+  back for a later hook to try.
 - **`/amtr` skill** (`skills/amtr/`). A thin wrapper over
   `amtr recall --amtr-key` for the cross-session case, plus a bare `/amtr` for
   reading back this session's own key. Compaction inside one session needs no
   key and no skill.
 
-The two delivering hooks fire on the same turn once a snapshot is ready, and the
-marker is what stops the memory being injected twice: whichever gets there first
-discharges it, and it is discharged only against the exact claim that was
-delivered, so a newer snapshot landing mid-turn survives.
+The two delivering hooks fire on the same turn once a snapshot is ready, and so
+do concurrent tool calls — the tool-call hook wakes every waiter on one shared
+deadline, so they reach the ready claim together by design. The marker is what
+stops the memory being injected twice, but it has to be taken *before* the
+injection to do that: whoever gets there first renames it out of everyone else's
+reach, which exactly one caller can win, and only that one delivers. Discharging
+it afterwards would settle the bookkeeping after the second copy had already
+reached the host. Ownership is checked against the exact claim, so a newer
+snapshot landing mid-turn survives untouched in a marker of its own.
 
 Both emit `additionalContext` rather than printing to stdout. `PreToolUse`
 ignores plain stdout on both hosts, so a hook that printed there would clear the
