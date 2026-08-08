@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "amtr",
-      "description": "Replaces a session's short-term working memory across compaction, and hands it to another session on request. A PreCompact hook starts a detached extraction over the journal since the last compaction; the next turn-start hook injects the result, because neither host can inject context from a compaction hook. Adds the /amtr skill for cross-session handoff.",
+      "description": "Replaces a session's short-term working memory across compaction, and hands it to another session on request. A PreCompact hook starts a detached extraction over the journal since the last compaction, so it runs beside the compaction rather than after it. Three hooks then race to inject the result — as the compaction ends, at the next tool call, or at the next prompt — whichever comes first once it is ready. Adds the /amtr skill for cross-session handoff.",
       "author": {
         "name": "Naoto Morishima"
       },

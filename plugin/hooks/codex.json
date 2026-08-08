@@ -8,7 +8,22 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" precompact",
-            "statusMessage": "Amnestic Trace: capturing working memory"
+            "statusMessage": "Amnestic Trace: capturing working memory",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" deliver SessionStart",
+            "statusMessage": "Amnestic Trace: restoring working memory",
+            "additionalContextLimit": 4000,
+            "timeout": 35
           }
         ]
       }
@@ -21,7 +36,8 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" deliver",
             "statusMessage": "Amnestic Trace: restoring working memory",
-            "additionalContextLimit": 4000
+            "additionalContextLimit": 4000,
+            "timeout": 35
           }
         ]
       }
@@ -34,7 +50,8 @@
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" recall",
             "statusMessage": "Amnestic Trace: restoring working memory",
-            "additionalContextLimit": 4000
+            "additionalContextLimit": 4000,
+            "timeout": 35
           }
         ]
       }

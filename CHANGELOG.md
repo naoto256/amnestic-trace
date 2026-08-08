@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Pre-1.0 releases may introduce breaking changes freely as the storage layout and hook contract converge. After 1.0, changes will follow semver strictly.
 
+## [0.1.4] - 2026-08-09
+
+> the earliest a memory can arrive is the moment the compaction ends
+
+Upgrading requires re-approving the plugin's hooks on Codex, and restarting the
+session on Claude Code. Both hook files gain a hook, which is a hook-definition
+change, and Codex binds its approval to those definitions by hash.
+
+### Added — delivery at the moment compaction ends
+
+Extraction is started before the compaction and runs beside it, so the two race.
+Nothing collected the winnings when extraction won: the memory sat ready while
+the session resumed without it, waiting for a tool call or a prompt that had not
+happened yet.
+
+`SessionStart` with its matcher set to `compact` fires on both hosts as soon as
+a compaction ends, and both accept context from it. That is the earliest point
+at which anything can be injected, so the snapshot now lands there when it is
+ready — before the resumed session does anything at all.
+
+When it is not ready, this hook waits on the same shared window as the tool-call
+deliverer rather than opening one of its own. A compaction that ends mid-turn is
+followed immediately by the tool calls the session was already making, and both
+are waiting out the same extraction; one budget covering all of them is the same
+debt paid once. Like the tool-call path and unlike the turn-start one, it leaves
+the debt standing if the wait runs out — abandoning it stays the backstop's
+decision.
+
+`PreCompact` still cannot inject on either host, and would have nothing to
+inject if it could: at that moment the extraction has only just been handed its
+input.
+
+### Added — presentation metadata for the Codex plugin manifest
+
+The manifest documentation describes an `interface` object as carrying the
+title, the descriptive copy, and the publisher metadata a host presents. This
+manifest declared none, so it offered a host nothing to present it with. It now
+declares one, in the shape the documentation describes.
+
+Only fields that state something true about this plugin are set: display name,
+short and long description, developer, category, and the repository URL. There
+are no icons or screenshots to point at, so those are left out rather than
+filled in. `capabilities` is omitted for a different reason: no set of allowed
+values is documented anywhere, and a field whose vocabulary is unknown is better
+absent than guessed at.
+
+The top-level manifest also gains `homepage`, `repository`, `license`, and
+`keywords`, matching what the bundled manifests carry.
+
 ## [0.1.3] - 2026-08-08
 
 > the tool calls right after a compaction are the ones made blind

@@ -73,11 +73,18 @@ and the next compaction rebuilds from it.
 Because the key is part of the marker, a reader discharges only the exact debt
 it delivered. A snapshot that lands mid-turn is a different claim and survives.
 
-## Two deliverers
+## Three deliverers
 
-A compaction fires in the middle of a turn, and the memory it produces cannot be
-injected from the compaction hook on either host. So delivery waits — and what
-it waits for decides how stale the memory is when it lands.
+A compaction fires in the middle of a turn, and nothing can be injected from
+the `PreCompact` hook — at that moment the extraction has only just been handed
+its input. So delivery falls to the hooks that run afterwards, and which one
+lands the memory decides how stale it is when it arrives.
+
+`SessionStart`, matched to `compact`, fires on both hosts the moment a
+compaction ends — the earliest injection point there is. When the extraction
+beat the compaction, the memory lands here, before the session does anything
+else. When it did not, this hook opens the shared waiting window described
+below rather than abandoning the debt.
 
 `UserPromptSubmit` waits for the user to speak again. A session that keeps
 working in between — the ordinary case for an agent left to run — can finish
@@ -85,38 +92,47 @@ everything the snapshot still calls pending. Half an hour of work has been
 observed in that gap, with the memory arriving afterwards describing the state
 before it.
 
-`PreToolUse` runs throughout that stretch, so it delivers at the first tool call
-instead:
+`PreToolUse` runs throughout that stretch, so it delivers at the first tool
+call after the snapshot lands:
 
 ```
+SessionStart      ready:<key> -> inject, discharge.   Fires as compaction ends.
+                  ongoing     -> wait, same shared window as below.
 PreToolUse        ready:<key> -> inject, discharge.
                   ongoing     -> wait, but only until this debt's deadline.
 UserPromptSubmit  poll 25s, then inject or give up.  Backstop.
 ```
 
-Both wait up to 25s for an extraction still in flight, and they differ in how
-that budget is spent. The turn-start hook spends it per turn: it runs once a
-turn, and a turn that misses the memory runs without it entirely, so it is worth
-sitting through the wait every time — and then giving up for good, because the
-user is waiting too.
+All three wait up to 25s for an extraction still in flight, and they differ in
+how that budget is spent. The turn-start hook spends it per turn: it runs once
+a turn, and a turn that misses the memory runs without it entirely, so it is
+worth sitting through the wait every time — and then giving up for good,
+because the user is waiting too.
 
-The tool-call hook spends one budget per compaction, shared by every tool call
-in the stretch that follows. The first call to find an unfinished extraction
-writes a deadline of now + 25s; every call arriving before that deadline waits
-alongside it, and every call arriving after steps aside without waiting. The
-deadline lives beside the marker and is cleared whenever the debt is — by a new
+The other two share one budget per compaction, spent across every hook in the
+stretch that follows. The first to find an unfinished extraction writes a
+deadline of now + 25s; every arrival before that deadline waits alongside it,
+and every arrival after steps aside without waiting. The compaction-end hook is
+usually the one that opens the window, since it runs first. The deadline lives
+beside the marker and is cleared whenever the debt is — by a new
 compaction, or by delivery. A deadline that reads back more than one budget
 ahead is refused rather than waited out: it cannot have been written by a clock
 that agrees with this one, and ending that wait is not the host timeout's job.
 
-That asymmetry is the point of the hook. Tool calls made between a compaction
-and its delivery are made without the memory, and the earliest of them are the
-most dangerous, so it is worth blocking a moment for those. But polling on every
-call would stall the session's real work for as long as extraction takes, and an
-extraction that has died would stall it indefinitely — an unbounded cost against
-a bounded benefit. So the wait is bounded: the unbounded "until the user next
-speaks" becomes "until the extraction finishes or 25s, whichever is sooner".
-Memory-less tool calls are not eliminated. They are capped.
+That asymmetry is the point of the shared window. Tool calls made between a
+compaction and its delivery are made without the memory, and the earliest of
+them are the most dangerous, so it is worth blocking a moment for those. But
+polling on every call would stall the session's real work for as long as
+extraction takes, and an extraction that has died would stall it indefinitely —
+an unbounded cost against a bounded benefit. So the wait is bounded: the
+unbounded "until the user next speaks" becomes "until the extraction finishes
+or 25s, whichever is sooner". Memory-less tool calls are not eliminated. They
+are capped.
+
+The compaction-end hook shares that window rather than owning one, because it
+is not alone in it: a compaction that ends mid-turn is followed immediately by
+the tool calls the session was already making. Both are waiting out the same
+extraction, and one budget covering all of them is the same debt paid once.
 
 Whichever arrives first takes the marker — by renaming it, which exactly one
 caller can win — and only the winner injects. Discharging it afterwards would
@@ -319,11 +335,13 @@ Ask the assistant whether its memory was restored, and it should be able to
 answer from that line — the tool is otherwise silent, so this is what makes a
 working injection distinguishable from a hook that never ran.
 
-**3b. The tool-call deliverer beats the turn-start one.** The case it exists
-for: after a compaction, have the session keep working without you saying
-anything — any task that runs a few tools. The memory should be delivered at the
-first tool call after the snapshot is ready, not held until your next prompt.
-Check the marker is gone before you speak again.
+**3b. The compaction-end and tool-call deliverers beat the turn-start one.** The
+case they exist for: after a compaction, have the session keep working without
+you saying anything — any task that runs a few tools. If the extraction finished
+first, the memory should already be in context when the compaction ends;
+otherwise it should arrive at the first tool call after the snapshot is ready.
+Either way, not held until your next prompt. Check the marker is gone before you
+speak again.
 
 A hook that never delivers here is silent by design, so the marker is the
 evidence: `ready:<key>` still sitting there while the session runs tools means
