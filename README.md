@@ -210,10 +210,11 @@ brew install naoto256/amnestic-trace/amtr
 The formula takes the same release binary described below, with the same
 checksums; the tap is [naoto256/homebrew-amnestic-trace](https://github.com/naoto256/homebrew-amnestic-trace).
 
-To place that binary yourself instead, verify it first:
+To place that binary yourself instead, verify it first, substituting the
+release you downloaded for `X.Y.Z`:
 
 ```sh
-tar -xzf amtr-v0.1.3-aarch64-apple-darwin.tar.gz
+tar -xzf amtr-vX.Y.Z-aarch64-apple-darwin.tar.gz
 sha256sum -c SHA256SUMS        # shasum -a 256 -c on macOS
 mkdir -p ~/.local/bin          # install does not create it
 install -m 755 amtr ~/.local/bin/amtr
@@ -246,6 +247,21 @@ hooks enabled, and its first session will ask you to trust them. Those steps,
 plus uninstall and prerequisites, are in
 [`plugin/README.md`](plugin/README.md) — the authority for anything
 host-specific.
+
+### Upgrading on Codex
+
+Codex trusts hook definitions by hash, so a release that changes any of them
+invalidates the approval you already gave, and the session after an upgrade
+will ask again. Until it is answered the hooks do not run — and they do not say
+so, because a hook that is never invoked cannot report anything. A compaction in
+that window falls back to the host's own summary and nothing marks the
+difference.
+
+So after upgrading, check that the first session prompts for trust and answer
+it. If it did not prompt and memory has stopped arriving, the release notes for
+the version you moved to say whether its hooks changed; a release that changed
+them and did not prompt has an approval left over from an install that is no
+longer there.
 
 Without the plugin the binary is still usable by hand, and the hooks are the
 only thing that makes it automatic.
