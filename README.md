@@ -213,7 +213,7 @@ checksums; the tap is [naoto256/homebrew-amnestic-trace](https://github.com/naot
 To place that binary yourself instead, verify it first:
 
 ```sh
-tar -xzf amtr-v0.1.1-aarch64-apple-darwin.tar.gz
+tar -xzf amtr-v0.1.3-aarch64-apple-darwin.tar.gz
 sha256sum -c SHA256SUMS        # shasum -a 256 -c on macOS
 mkdir -p ~/.local/bin          # install does not create it
 install -m 755 amtr ~/.local/bin/amtr

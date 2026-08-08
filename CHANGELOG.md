@@ -6,6 +6,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Pre-1.0 releases may introduce breaking changes freely as the storage layout and hook contract converge. After 1.0, changes will follow semver strictly.
 
+## [0.1.3] - 2026-08-08
+
+> the tool calls right after a compaction are the ones made blind
+
+Upgrading on Codex requires re-approving the plugin's hooks. The tool-call
+hook's declared timeout changes, and Codex trusts hook definitions by hash, so
+any change to them invalidates the old approval. An unapproved hook is skipped
+silently — there is no error to notice, the memory just stops arriving.
+
+### Changed — the tool-call deliverer waits once per compaction
+
+The tool-call hook exists because a session that keeps working after a
+compaction does so without its memory: every tool call in that stretch is made
+blind. But it delivered only what was already finished and stepped aside
+otherwise, so a hook added to shrink the blind stretch still let the calls at
+its start run blind — and those are the dangerous ones. The first thing a
+session that has just lost "confirm before pushing" does is push.
+
+It now waits for an extraction in flight, on a budget of 25s per compaction
+shared by every tool call that follows, rather than 25s per call. The first
+call to find the extraction unfinished writes a deadline beside the marker;
+calls arriving before it wait alongside, calls arriving after step aside. Per
+debt rather than per call because polling on every call would stall the
+session's real work for as long as extraction takes, and an extraction that had
+died would stall it indefinitely — an unbounded cost against a bounded benefit.
+
+This does not eliminate memory-less tool calls. It bounds them: the unbounded
+"until the user next speaks" becomes "until the extraction finishes or 25s,
+whichever is sooner". A deadline that reads back further ahead than one budget
+is refused rather than waited out, since it cannot have been written by a clock
+that agrees with this one, and ending that wait is not the host timeout's job.
+
+### Fixed — a snapshot could be injected twice into the same turn
+
+Delivery discharged the marker after injecting, which settled which hook owned
+a snapshot but settled it too late to be exclusive: by then the handoff had
+already reached the host. Two callers reading the same claim therefore both
+injected it. Waiting on a shared deadline turns that from a coincidence into
+the normal case, since every waiter wakes the instant the snapshot lands.
+
+Ownership is now taken before injecting, by renaming the marker — an operation
+exactly one caller can win. Whoever loses finds nothing to move and steps
+aside. Holding the marker also makes the identity check answerable, so it moved
+to immediately after the rename, where nothing else can change the answer.
+
+A claim held for delivery is put back if nothing was injected, and the restore
+is a hard link rather than a copy. A copy has a gap between testing the claim
+and reading it, and the redirect creates the marker before the copy discovers
+its input is gone — leaving a marker that names no snapshot, which every later
+hook sees and none can discharge. A link either publishes the claim whole or
+fails, and failing is right both ways it can fail: the claim was swept, or a
+newer marker already holds the name and must not be displaced by an older claim
+returning.
+
+A hook killed between claiming and settling leaves its claim behind, and
+nothing removed it. `PreCompact` now sweeps them, since a new compaction
+supersedes whatever they were holding.
+
 ## [0.1.2] - 2026-08-08
 
 > streaming the journal so the memory keeps arriving
@@ -239,6 +297,7 @@ The exit status distinguishes what happened, because the delivery hook depends
 on it: `0` handed over a handoff, `1` had nothing to hand over or failed, `2`
 was called wrong. A caller that discharges a snapshot should do so only on `0`.
 
+[0.1.3]: https://github.com/naoto256/amnestic-trace/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/naoto256/amnestic-trace/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/naoto256/amnestic-trace/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/naoto256/amnestic-trace/releases/tag/v0.1.0
