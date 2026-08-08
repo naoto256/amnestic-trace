@@ -118,8 +118,11 @@ a bounded benefit. So the wait is bounded: the unbounded "until the user next
 speaks" becomes "until the extraction finishes or 25s, whichever is sooner".
 Memory-less tool calls are not eliminated. They are capped.
 
-Whichever arrives first discharges the marker, which is what stops the other
-from injecting the same memory twice.
+Whichever arrives first takes the marker — by renaming it, which exactly one
+caller can win — and only the winner injects. Discharging it afterwards would
+be too late to stop a second injection, since by then the handoff has already
+gone to the host. Waiting on a shared deadline makes that race the normal case
+rather than a coincidence: every waiter wakes the moment the snapshot lands.
 
 ## Size
 
