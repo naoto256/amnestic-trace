@@ -174,8 +174,15 @@ deliver_claim() {
 # compaction that wrote its own marker while this one was held is not overwritten
 # by the older claim being returned; in that case the older one is simply
 # dropped, which is the same thing that happens to any superseded snapshot.
+#
+# Nothing is restored from a claim file that is missing or empty. The redirect
+# below opens `$marker` before `cat` reads, so a `cat` with nothing to read
+# would leave an empty marker standing in for a real one — a claim shaped like
+# a debt that names no snapshot.
 restore_claim() {
-	(set -C; cat "$pending" >"$marker") 2>/dev/null
+	if [ -s "$pending" ]; then
+		(set -C; cat "$pending" >"$marker") 2>/dev/null
+	fi
 	rm -f "$pending"
 }
 
@@ -196,6 +203,13 @@ precompact)
 	# budget. Cleared before the marker is written so a tool call landing
 	# between the two cannot inherit the previous debt's spent deadline.
 	rm -f "$deadline_file"
+	# A claim held for delivery is normally either discharged or restored, but
+	# a hook killed between the two leaves the file it was holding behind, and
+	# nothing else would ever remove it. Swept here because a new compaction is
+	# the point at which any claim still outstanding is superseded anyway: what
+	# these files hold is a snapshot this compaction is about to replace. An
+	# unmatched glob is passed through literally, which `rm -f` ignores.
+	rm -f "$marker".delivering.*
 	# Returns as soon as the worker has detached and the marker is on disk.
 	# stderr goes to the log because the binary cannot redirect its own until it
 	# has resolved the home directory, and a home that will not resolve is
