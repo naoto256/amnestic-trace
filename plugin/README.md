@@ -44,6 +44,10 @@ it afterwards would settle the bookkeeping after the second copy had already
 reached the host. Ownership is checked against the exact claim, so a newer
 snapshot landing mid-turn survives untouched in a marker of its own.
 
+A held claim is either discharged or put back, but a hook killed between the two
+leaves the file it was holding behind. `PreCompact` sweeps any left over, since
+a new compaction supersedes whatever they were holding anyway.
+
 Both emit `additionalContext` rather than printing to stdout. `PreToolUse`
 ignores plain stdout on both hosts, so a hook that printed there would clear the
 marker and deliver nothing — silently, on the path that was supposed to be the
