@@ -212,6 +212,29 @@ cases() {
 	kill "$hook_pid" 2>/dev/null
 	wait 2>/dev/null || true
 
+	# A deadline further ahead than one budget cannot have been written by a
+	# tool call whose clock agreed with this one. Sitting in it would hand the
+	# job of ending the wait to the host's hook timeout; refusing it keeps that
+	# bound inside the script.
+	#
+	# Observed from outside rather than timed around a foreground call: the
+	# behaviour this guards against is an over-long wait, and a foreground call
+	# that waits too long hangs the suite instead of failing it.
+	fresh
+	printf 'ongoing' >"$marker"
+	deadline_at 60
+	(
+		run_hook deliver >/dev/null 2>&1
+		printf 'returned' >"$work/deliver-returned"
+	) &
+	hook_pid=$!
+	sleep 3
+	check "an implausibly distant deadline is refused, not waited out" \
+		"$(cat "$work/deliver-returned" 2>/dev/null || printf 'still-waiting')" "returned"
+	kill "$hook_pid" 2>/dev/null
+	wait 2>/dev/null || true
+	check "  and the debt still stands" "$(marker_now)" "ongoing"
+
 	# One window per debt, not one per tool call: a second call landing inside
 	# the window joins it rather than starting its own.
 	fresh

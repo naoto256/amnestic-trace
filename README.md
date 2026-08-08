@@ -105,7 +105,9 @@ in the stretch that follows. The first call to find an unfinished extraction
 writes a deadline of now + 25s; every call arriving before that deadline waits
 alongside it, and every call arriving after steps aside without waiting. The
 deadline lives beside the marker and is cleared whenever the debt is — by a new
-compaction, or by delivery.
+compaction, or by delivery. A deadline that reads back more than one budget
+ahead is refused rather than waited out: it cannot have been written by a clock
+that agrees with this one, and ending that wait is not the host timeout's job.
 
 That asymmetry is the point of the hook. Tool calls made between a compaction
 and its delivery are made without the memory, and the earliest of them are the
