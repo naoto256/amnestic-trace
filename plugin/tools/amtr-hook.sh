@@ -15,7 +15,11 @@
 # turns that call no tools at all.
 #
 # Whichever arrives first discharges the marker, and the marker is what keeps
-# the other from delivering it twice.
+# the other from delivering it twice. Both will wait up to 25s for an
+# extraction still in flight, but they spend that budget differently: the
+# turn-start hook has one chance per turn and spends it on every turn it runs,
+# while the tool-call hook spends one budget per compaction, shared by every
+# tool call in the stretch that follows it.
 #
 # Every path exits 0 with no stdout unless there is something to inject: the
 # hook must never be the reason a turn fails.
@@ -77,6 +81,10 @@ fi
 slug=$(printf '%s' "$session_id" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/_/g; s/^\.*//; s/\.*$//')
 [ -n "$slug" ] || slug=_
 marker="$amtr_home/prefrontal-cortex/$slug.marker"
+# Holds the epoch second at which the tool-call deliverer stops waiting for the
+# snapshot this marker owes. See the `deliver` case for why the budget is spent
+# once per debt rather than once per tool call.
+deadline_file="$amtr_home/prefrontal-cortex/$slug.deliver-deadline"
 
 # Hook execution inherits a minimal PATH that omits where cargo and the usual
 # installers write, so `command -v` would otherwise miss an installed binary.
@@ -138,7 +146,7 @@ deliver_claim() {
 		# this turn is in flight, and its `ready:<newer key>` must not be
 		# discharged by whoever delivered the older one.
 		if [ "$(cat "$marker" 2>/dev/null)" = "$2" ]; then
-			rm -f "$marker"
+			rm -f "$marker" "$deadline_file"
 		fi
 	fi
 }
@@ -156,6 +164,10 @@ precompact)
 		journal=$(find "$home/.codex/sessions" -name "*$session_id*.jsonl" 2>/dev/null | head -1)
 	fi
 	[ -n "$journal" ] && [ -f "$journal" ] || exit 0
+	# A new compaction is a new debt, and a new debt gets its own waiting
+	# budget. Cleared before the marker is written so a tool call landing
+	# between the two cannot inherit the previous debt's spent deadline.
+	rm -f "$deadline_file"
 	# Returns as soon as the worker has detached and the marker is on disk.
 	# stderr goes to the log because the binary cannot redirect its own until it
 	# has resolved the home directory, and a home that will not resolve is
@@ -167,18 +179,70 @@ deliver)
 	# file unless a snapshot is actually owed.
 	[ -f "$marker" ] || exit 0
 
-	# Deliberately no poll here. A turn-start hook can afford to wait out an
-	# extraction because the user has just spoken and is waiting anyway; a tool
-	# call cannot, and stalling every tool call for the better part of a minute
-	# would be a worse tool than the memory is a good one. If the snapshot is
-	# not ready yet this simply steps aside: the next tool call is moments away,
-	# and the turn-start hook is still behind it.
 	claim=$(cat "$marker" 2>/dev/null)
 	case "$claim" in
 	ready:*) ;;
-	# Not ready, so nothing to deliver — and, unlike the turn-start path, the
-	# marker stays. Giving up on the debt is the backstop's decision to make;
-	# this one is only ever early.
+	ongoing)
+		# The budget is 25s per DEBT, not per tool call, and it is a wall-clock
+		# deadline rather than a per-process countdown so that concurrent tool
+		# calls share one window instead of each opening its own.
+		#
+		# Waiting at all is the point: this hook exists because a session that
+		# keeps working after a compaction does so without its memory, and every
+		# tool call made in that stretch is one made blind. Waiting once buys the
+		# most dangerous of them — the first few, before the extraction lands —
+		# a chance to arrive informed.
+		#
+		# Waiting only once is the other half. Polling on every tool call would
+		# stall the session's real work for as long as the extraction takes, and
+		# an extraction that has died would stall it forever; the cost of being
+		# wrong is unbounded where the benefit is not. After the deadline this
+		# steps aside as before, because a later tool call is moments away and
+		# the turn-start hook is still behind it.
+		#
+		# So this does not eliminate memory-less tool calls. It bounds them: the
+		# unbounded "until the user next speaks" becomes "until the extraction
+		# finishes or 25s, whichever is sooner".
+		now=$(date +%s 2>/dev/null) || exit 0
+		case "$now" in
+		'' | *[!0-9]*) exit 0 ;;
+		esac
+		# `set -C` in a subshell so the flag does not leak: whoever creates the
+		# file names the deadline, everyone else reads it. The value is written
+		# rather than inferred from mtime because `stat` spells that differently
+		# on macOS and Linux, and this runs on both under four shells.
+		if (set -C; printf '%s' "$((now + 25))" >"$deadline_file") 2>/dev/null; then
+			deadline=$((now + 25))
+		else
+			deadline=$(cat "$deadline_file" 2>/dev/null)
+			case "$deadline" in
+			# Unreadable or half-written: treat the budget as spent. Guessing a
+			# fresh one here is how one debt's window becomes many.
+			'' | *[!0-9]*) exit 0 ;;
+			esac
+		fi
+
+		while [ "$now" -lt "$deadline" ]; do
+			case "$(cat "$marker" 2>/dev/null)" in
+			ongoing) ;;
+			*) break ;;
+			esac
+			sleep 1
+			now=$(date +%s 2>/dev/null) || break
+			case "$now" in
+			'' | *[!0-9]*) break ;;
+			esac
+		done
+
+		claim=$(cat "$marker" 2>/dev/null)
+		case "$claim" in
+		ready:*) ;;
+		# Still not ready, so nothing to deliver — and, unlike the turn-start
+		# path, the marker stays. Giving up on the debt is the backstop's
+		# decision to make; this one is only ever early.
+		*) exit 0 ;;
+		esac
+		;;
 	*) exit 0 ;;
 	esac
 
@@ -190,8 +254,11 @@ recall)
 	# including every turn where the delivery above already discharged it.
 	[ -f "$marker" ] || exit 0
 
-	# The poll budget is 25s. hooks/claude.json declares a 35s timeout around
-	# it, leaving room for the read that follows; hooks/codex.json declares
+	# The poll budget is 25s, spent per turn: this hook runs once a turn and a
+	# turn that misses the memory runs without it entirely. Contrast the
+	# tool-call deliverer above, which spends 25s per compaction across all the
+	# tool calls that follow it. hooks/claude.json declares a 35s timeout around
+	# both, leaving room for the read that follows; hooks/codex.json declares
 	# none, because the unit of that field is unverified on Codex and a wrong
 	# guess would kill the hook outright rather than fail visibly.
 	waited=0
@@ -214,7 +281,7 @@ recall)
 		# survives, so the damage is that this compaction falls back to the
 		# host's native summary. Dropping the marker here is safe — a worker
 		# that lands late rewrites it and the next turn delivers.
-		rm -f "$marker"
+		rm -f "$marker" "$deadline_file"
 		exit 0
 		;;
 	esac
