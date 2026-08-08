@@ -231,6 +231,15 @@ interactive Codex session after installing will ask you to review and trust the
 new hooks before it will run them — hooks run outside its sandbox, so Codex
 requires a human to approve them and no amount of configuration skips that.
 
+That approval is bound to the hook definitions it was given, by hash, so it does
+not survive them changing. Any update that edits a hook — a command, a timeout,
+even a status message — invalidates it, and the next session asks again. Until it
+is answered the hooks do not run, and nothing reports that: a hook that is never
+invoked cannot say it was skipped, so the only visible symptom is that whatever
+the hooks did quietly stops happening. Answer the prompt after an update, and if
+memory has stopped arriving without one, the approval on file belongs to hook
+definitions that are no longer installed.
+
 For a marketplace added from a local directory, Codex runs the plugin **from
 that directory**, not from the copy under `~/.codex/plugins/cache/`. Editing the
 source takes effect on the next session; editing the cache does nothing. A
