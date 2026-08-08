@@ -32,8 +32,29 @@ fresh() {
 	rm -rf "$work"
 	mkdir -p "$work/bin" "$work/.local/share/amtr/prefrontal-cortex"
 	marker=$work/.local/share/amtr/prefrontal-cortex/sess1.marker
+	deadline_file=$work/.local/share/amtr/prefrontal-cortex/sess1.deliver-deadline
 	stub_exit=0
 	stub
+}
+
+# The tool-call deliverer waits until the epoch second named in its deadline
+# file. Setting that file directly is how these cases reach the interesting
+# states without spending the real 25s budget.
+deadline_at() {
+	printf '%s' "$(($(date +%s) + $1))" >"$deadline_file"
+}
+
+# A window already closed: the debt's budget has been spent by an earlier tool
+# call, so the next one must not wait.
+spend_budget() {
+	deadline_at -60
+}
+
+budget_shape() {
+	case "$1" in
+	'' | *[!0-9]*) printf 'absent-or-malformed' ;;
+	*) [ "$1" -gt "$(date +%s)" ] && printf 'future' || printf 'past' ;;
+	esac
 }
 
 # Stub standing in for the real binary. `stub_exit` sets what `recall` reports:
@@ -145,21 +166,85 @@ cases() {
 	# waiting and something has to end the wait. This one is only ever early:
 	# the next tool call is moments away and the backstop is still behind it, so
 	# discarding the debt here would throw away a memory that was still coming.
+	# Budget pre-spent, so this is the tool call that arrives after the window.
 	fresh
 	printf 'ongoing' >"$marker"
+	spend_budget
 	check "an unfinished extraction is left alone" "$(run_hook deliver)" ""
 	check "  and the debt still stands" "$(marker_now)" "ongoing"
 
-	# A tool call cannot afford the turn-start hook's 25s poll: it would stall
-	# every tool call in the turn after a compaction. Timed rather than argued,
-	# because a poll is one line to add back by accident.
+	# The bound on waiting. One budget is opened per compaction, so the tool
+	# call that arrives after it has been spent does not stall — otherwise every
+	# tool call in the stretch after a compaction would wait out the extraction,
+	# and an extraction that had died would stall them all forever. Timed rather
+	# than argued, because a poll is one line to add back by accident.
 	fresh
 	printf 'ongoing' >"$marker"
+	spend_budget
 	started=$(date +%s)
 	run_hook deliver >/dev/null
 	elapsed=$(($(date +%s) - started))
-	check "and does not stall the tool call waiting for it" \
+	check "a tool call past the budget does not stall" \
 		"$([ "$elapsed" -lt 5 ] && echo prompt || echo "slow:${elapsed}s")" "prompt"
+
+	# ...but the first one does wait, because the tool calls made in the stretch
+	# right after a compaction are the ones made blind, and they are the reason
+	# this hook exists at all. Here the extraction lands while the hook is
+	# waiting, and the memory rides the tool call it would otherwise have missed.
+	fresh
+	printf 'ongoing' >"$marker"
+	deadline_at 5
+	( sleep 1; printf 'ready:amtr-k1' >"$marker" ) &
+	check "the first tool call waits for an extraction in flight" \
+		"$(run_hook deliver)" "DELIVERED:sess1:PreToolUse:amtr-k1"
+	wait 2>/dev/null || true
+
+	# Nobody has waited yet, so this tool call opens the window. Checked from
+	# outside because the hook is still sitting in it.
+	fresh
+	printf 'ongoing' >"$marker"
+	run_hook deliver >/dev/null 2>&1 &
+	hook_pid=$!
+	sleep 1
+	budget=$(cat "$deadline_file" 2>/dev/null)
+	check "the first tool call opens a waiting window" \
+		"$(budget_shape "$budget")" "future"
+	kill "$hook_pid" 2>/dev/null
+	wait 2>/dev/null || true
+
+	# One window per debt, not one per tool call: a second call landing inside
+	# the window joins it rather than starting its own.
+	fresh
+	printf 'ongoing' >"$marker"
+	deadline_at 5
+	before=$(cat "$deadline_file")
+	run_hook deliver >/dev/null 2>&1 &
+	hook_pid=$!
+	sleep 1
+	check "a later tool call joins the window instead of opening another" \
+		"$(cat "$deadline_file")" "$before"
+	kill "$hook_pid" 2>/dev/null
+	wait 2>/dev/null || true
+
+	# A new compaction is a new debt, and a new debt gets its own window. The
+	# previous one's spent budget must not carry over, or the session that most
+	# needs the wait — one compacting repeatedly — never gets it.
+	fresh
+	spend_budget
+	printf '%s' "irrelevant" >"$work/journal.jsonl"
+	printf '{"session_id":"sess1","transcript_path":"%s"}' "$work/journal.jsonl" |
+		feed precompact >/dev/null 2>&1
+	check "a new compaction reopens the waiting window" \
+		"$(cat "$deadline_file" 2>/dev/null || printf 'GONE')" "GONE"
+
+	# And a delivered debt takes its window with it, so the next compaction
+	# starts from a clean slate even if nothing else ran in between.
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	deadline_at 5
+	run_hook deliver >/dev/null
+	check "discharging the debt clears its window" \
+		"$(cat "$deadline_file" 2>/dev/null || printf 'GONE')" "GONE"
 
 	# Both hooks fire on the same turn once the memory is ready. The marker is
 	# what stops the same snapshot being injected twice.

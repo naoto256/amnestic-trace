@@ -89,16 +89,32 @@ before it.
 instead:
 
 ```
-PreToolUse        ready:<key> -> inject, discharge.  Otherwise step aside.
+PreToolUse        ready:<key> -> inject, discharge.
+                  ongoing     -> wait, but only until this debt's deadline.
 UserPromptSubmit  poll 25s, then inject or give up.  Backstop.
 ```
 
-They differ in what they do when the snapshot is not ready yet. The turn-start
-hook has a user waiting on it, so it waits out the extraction and then gives up
-for good. The tool-call hook is only ever early: the next tool call is moments
-away and the backstop is still behind it, so it leaves the marker alone and does
-not poll — stalling every tool call in a turn would cost more than the memory is
-worth.
+Both wait up to 25s for an extraction still in flight, and they differ in how
+that budget is spent. The turn-start hook spends it per turn: it runs once a
+turn, and a turn that misses the memory runs without it entirely, so it is worth
+sitting through the wait every time — and then giving up for good, because the
+user is waiting too.
+
+The tool-call hook spends one budget per compaction, shared by every tool call
+in the stretch that follows. The first call to find an unfinished extraction
+writes a deadline of now + 25s; every call arriving before that deadline waits
+alongside it, and every call arriving after steps aside without waiting. The
+deadline lives beside the marker and is cleared whenever the debt is — by a new
+compaction, or by delivery.
+
+That asymmetry is the point of the hook. Tool calls made between a compaction
+and its delivery are made without the memory, and the earliest of them are the
+most dangerous, so it is worth blocking a moment for those. But polling on every
+call would stall the session's real work for as long as extraction takes, and an
+extraction that has died would stall it indefinitely — an unbounded cost against
+a bounded benefit. So the wait is bounded: the unbounded "until the user next
+speaks" becomes "until the extraction finishes or 25s, whichever is sooner".
+Memory-less tool calls are not eliminated. They are capped.
 
 Whichever arrives first discharges the marker, which is what stops the other
 from injecting the same memory twice.
