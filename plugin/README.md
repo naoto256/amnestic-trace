@@ -15,15 +15,19 @@ session.
 - **`PreToolUse` hook** (`tools/amtr-hook.sh deliver`). Delivers the snapshot at
   the first tool call after it is ready. Compaction happens mid-turn and no host
   can inject from a compaction hook, so something has to carry the memory
-  forward; this is the earliest thing that runs. If the snapshot is not ready it
-  steps aside without polling and without touching the marker — a tool call
-  cannot afford the wait, and the debt is not this hook's to abandon.
+  forward; this is the earliest thing that runs. If extraction is still in
+  flight it waits — but on a budget of 25s per compaction, shared by every tool
+  call in the stretch, not 25s per call. The first call to find the extraction
+  unfinished records a deadline next to the marker; calls arriving before it
+  wait alongside, calls arriving after step aside. Either way the debt itself is
+  left standing: abandoning it is the backstop's decision, not this hook's.
 - **`UserPromptSubmit` hook** (`tools/amtr-hook.sh recall`). The backstop, for
   turns that call no tools at all. It waits while extraction is still running
   and gives up after 25s, injecting nothing and clearing the marker so later
-  turns do not sit through the poll again. On the delivering path the marker is
-  cleared only once `amtr recall` reports that it actually printed a handoff —
-  exit 0 means delivered, 1 means nothing was.
+  turns do not sit through the poll again. Its budget is per turn, because it
+  only runs once a turn. On the delivering path the marker is cleared only once
+  `amtr recall` reports that it actually printed a handoff — exit 0 means
+  delivered, 1 means nothing was.
 - **`/amtr` skill** (`skills/amtr/`). A thin wrapper over
   `amtr recall --amtr-key` for the cross-session case, plus a bare `/amtr` for
   reading back this session's own key. Compaction inside one session needs no
@@ -47,9 +51,9 @@ identical; the declarations are split because what can be asserted about each
 host is not.
 
 Concretely, the Claude Code file sets `timeout` explicitly — 10s for the capture
-hook, which returns as soon as the worker has detached, 10s for the tool-call
-deliverer, which never waits for anything, and 35s for the turn-start one, which
-needs room for the 25s poll plus the read that follows. The Codex file sets no
+hook, which returns as soon as the worker has detached, and 35s for both
+delivering hooks, each of which needs room for a 25s wait plus the read that
+follows. The Codex file sets no
 timeout, because the unit of that field is not documented for Codex and a wrong
 guess would kill the hook instantly rather than fail visibly. Leaving it to the
 host's default is the honest default.
