@@ -50,6 +50,16 @@ spend_budget() {
 	deadline_at -60
 }
 
+# Publishes a claim the way the worker does, for cases that hand one to a hook
+# already running. A plain redirect truncates before it writes, so a poll landing
+# in that gap reads an empty marker, treats it as no longer `ongoing`, and steps
+# aside — the hook under test then does nothing, and the case fails for a reason
+# that has nothing to do with what it is testing.
+publish_claim() {
+	printf '%s' "$1" >"$marker.publishing"
+	mv "$marker.publishing" "$marker"
+}
+
 # Waits for a hook to signal that it has reached the point a case wants to
 # interfere with. A sleep long enough to be safe on a loaded machine is a slow
 # suite; one short enough to keep the suite quick is a flake.
@@ -205,7 +215,7 @@ cases() {
 	fresh
 	printf 'ongoing' >"$marker"
 	deadline_at 5
-	( sleep 1; printf 'ready:amtr-k1' >"$marker" ) &
+	( sleep 1; publish_claim 'ready:amtr-k1' ) &
 	check "the first tool call waits for an extraction in flight" \
 		"$(run_hook deliver)" "DELIVERED:sess1:PreToolUse:amtr-k1"
 	wait 2>/dev/null || true
@@ -224,7 +234,7 @@ cases() {
 		i=$((i + 1))
 	done
 	sleep 2
-	printf 'ready:amtr-k1' >"$marker"
+	publish_claim 'ready:amtr-k1'
 	wait 2>/dev/null || true
 	check "concurrent waiters deliver the snapshot exactly once" \
 		"$(cat "$work"/race.* 2>/dev/null | grep -c DELIVERED)" "1"
