@@ -199,6 +199,25 @@ cases() {
 		"$(run_hook deliver)" "DELIVERED:sess1:PreToolUse:amtr-k1"
 	wait 2>/dev/null || true
 
+	# Waiting on a shared deadline means concurrent tool calls wake together by
+	# design, so the moment the snapshot lands they are all holding the same
+	# ready claim. Exactly one may inject it: discharging the marker afterwards
+	# cannot prevent a second injection, because by then it has already gone to
+	# the host. Two waiters, one delivery.
+	fresh
+	printf 'ongoing' >"$marker"
+	deadline_at 10
+	i=1
+	while [ "$i" -le 2 ]; do
+		run_hook deliver >"$work/race.$i" 2>/dev/null &
+		i=$((i + 1))
+	done
+	sleep 2
+	printf 'ready:amtr-k1' >"$marker"
+	wait 2>/dev/null || true
+	check "concurrent waiters deliver the snapshot exactly once" \
+		"$(cat "$work"/race.* 2>/dev/null | grep -c DELIVERED)" "1"
+
 	# Nobody has waited yet, so this tool call opens the window. Checked from
 	# outside because the hook is still sitting in it.
 	fresh

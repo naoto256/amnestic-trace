@@ -137,18 +137,46 @@ log="$amtr_home/amtr.log"
 # stderr goes to the log because an unparseable row fails here on every turn,
 # and the reason is the only evidence anyone gets.
 deliver_claim() {
-	# `--expect` names the snapshot the marker owed. A compaction landing
-	# between the read above and the call below would otherwise have this
-	# deliver the newer row while failing to discharge it, and the next hook
-	# would deliver the same memory a second time.
-	if amtr recall "$session_id" --hook-json "$1" --expect "${2#ready:}" 2>>"$log"; then
-		# The whole claim, not just its shape. A compaction can finish while
-		# this turn is in flight, and its `ready:<newer key>` must not be
-		# discharged by whoever delivered the older one.
-		if [ "$(cat "$marker" 2>/dev/null)" = "$2" ]; then
-			rm -f "$marker" "$deadline_file"
-		fi
+	# Take the marker before injecting anything, by renaming it somewhere only
+	# this process knows. Concurrent tool calls can reach here at the same
+	# instant — the tool-call deliverer wakes every waiter on one deadline, so
+	# they arrive together by design rather than by coincidence — and a rename
+	# is the one operation exactly one of them can win. Whoever loses finds no
+	# marker to move and steps aside, which is what stops the same memory being
+	# injected twice into the same turn.
+	#
+	# Discharging afterwards cannot do this job: by the time the marker is
+	# removed the handoff has already gone to the host.
+	pending="$marker.delivering.$$"
+	mv "$marker" "$pending" 2>/dev/null || return 0
+
+	# Identity is checked here rather than after delivery, because holding the
+	# marker is what makes the answer stable. A compaction landing between the
+	# read that produced `$2` and the rename above leaves a newer claim in
+	# hand, and delivering that one would hand over a snapshot nobody asked
+	# for and discharge a debt nobody paid.
+	if [ "$(cat "$pending" 2>/dev/null)" != "$2" ]; then
+		restore_claim
+		return 0
 	fi
+
+	# `--expect` names the snapshot the marker owed, so the binary can decline
+	# a row that is no longer the one claimed here.
+	if amtr recall "$session_id" --hook-json "$1" --expect "${2#ready:}" 2>>"$log"; then
+		rm -f "$pending" "$deadline_file"
+	else
+		# Nothing reached the host, so the debt still stands.
+		restore_claim
+	fi
+}
+
+# Puts a claim back after a delivery that did not happen. `set -C` so a newer
+# compaction that wrote its own marker while this one was held is not overwritten
+# by the older claim being returned; in that case the older one is simply
+# dropped, which is the same thing that happens to any superseded snapshot.
+restore_claim() {
+	(set -C; cat "$pending" >"$marker") 2>/dev/null
+	rm -f "$pending"
 }
 
 case "$event" in
