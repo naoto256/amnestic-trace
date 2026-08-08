@@ -279,6 +279,41 @@ cases() {
 	check "a new compaction reopens the waiting window" \
 		"$(cat "$deadline_file" 2>/dev/null || printf 'GONE')" "GONE"
 
+	# A claim taken for delivery is normally discharged or restored, but a hook
+	# killed between the two leaves it behind and nothing else would remove it.
+	# Left alone it accumulates in the store for the life of the machine.
+	fresh
+	printf 'ready:amtr-orphan' >"$marker.delivering.99999"
+	printf '%s\n' '{"type":"mode","sessionId":"sess1"}' >"$work/j.jsonl"
+	printf '{"session_id":"sess1","transcript_path":"%s"}' "$work/j.jsonl" |
+		feed precompact >/dev/null 2>&1
+	check "a new compaction sweeps a claim left behind by a killed hook" \
+		"$(ls "$work"/.local/share/amtr/prefrontal-cortex/*.delivering.* 2>/dev/null | wc -l | tr -d ' ')" "0"
+
+	# Sweeping means a claim can vanish from under a delivery that is still
+	# running, and that delivery still tries to put it back when it fails. There
+	# is nothing to put back, and restoring nothing is worse than restoring
+	# nothing quietly: the redirect opens the marker before `cat` reads, so it
+	# would leave an empty marker — a debt naming no snapshot, which every later
+	# hook sees and none can discharge. Driven through the real path, with a
+	# delivery slow enough to be swept while it runs.
+	fresh
+	printf 'ready:amtr-k1' >"$marker"
+	cat >"$work/bin/amtr" <<'STUB'
+#!/bin/sh
+sleep 2
+exit 1
+STUB
+	chmod +x "$work/bin/amtr"
+	run_hook deliver >/dev/null 2>&1 &
+	hook_pid=$!
+	sleep 1
+	rm -f "$marker".delivering.*
+	wait 2>/dev/null || true
+	check "a claim swept mid-delivery is not restored as an empty marker" \
+		"$(marker_now)" "GONE"
+	stub
+
 	# And a delivered debt takes its window with it, so the next compaction
 	# starts from a clean slate even if nothing else ran in between.
 	fresh
