@@ -207,12 +207,15 @@ deliver)
 		case "$now" in
 		'' | *[!0-9]*) exit 0 ;;
 		esac
+		# One name for the budget, so the value that opens a window and the
+		# value that bounds a window cannot drift apart.
+		budget=25
 		# `set -C` in a subshell so the flag does not leak: whoever creates the
 		# file names the deadline, everyone else reads it. The value is written
 		# rather than inferred from mtime because `stat` spells that differently
 		# on macOS and Linux, and this runs on both under four shells.
-		if (set -C; printf '%s' "$((now + 25))" >"$deadline_file") 2>/dev/null; then
-			deadline=$((now + 25))
+		if (set -C; printf '%s' "$((now + budget))" >"$deadline_file") 2>/dev/null; then
+			deadline=$((now + budget))
 		else
 			deadline=$(cat "$deadline_file" 2>/dev/null)
 			case "$deadline" in
@@ -220,6 +223,15 @@ deliver)
 			# fresh one here is how one debt's window becomes many.
 			'' | *[!0-9]*) exit 0 ;;
 			esac
+			# Every deadline is some earlier reader's `now + budget`, and this
+			# reader's clock is at or past that reader's, so a deadline can
+			# never be more than one budget ahead of it. Further ahead than that
+			# means the clock has jumped backwards under us, or the file did not
+			# come from this code. Treat it as spent rather than sit in it: the
+			# host's hook timeout would eventually end the wait, but a bound
+			# this script can derive from its own invariant is a bound it should
+			# not be borrowing from the host.
+			[ "$((deadline - now))" -le "$budget" ] || exit 0
 		fi
 
 		while [ "$now" -lt "$deadline" ]; do
