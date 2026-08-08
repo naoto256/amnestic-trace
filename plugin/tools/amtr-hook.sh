@@ -170,19 +170,22 @@ deliver_claim() {
 	fi
 }
 
-# Puts a claim back after a delivery that did not happen. `set -C` so a newer
-# compaction that wrote its own marker while this one was held is not overwritten
-# by the older claim being returned; in that case the older one is simply
-# dropped, which is the same thing that happens to any superseded snapshot.
+# Puts a claim back after a delivery that did not happen.
 #
-# Nothing is restored from a claim file that is missing or empty. The redirect
-# below opens `$marker` before `cat` reads, so a `cat` with nothing to read
-# would leave an empty marker standing in for a real one — a claim shaped like
-# a debt that names no snapshot.
+# A hard link, because it publishes the claim under the marker's name in one
+# step: either the file already holding the claim becomes reachable as
+# `$marker`, or nothing happens. Copying cannot promise that, however carefully
+# it is guarded — the redirect creates the marker before the read discovers the
+# claim has been swept out from under it, and no test of the claim beforehand
+# closes that window, only narrows it. What it leaves behind is a marker naming
+# no snapshot: a debt every later hook can see and none can discharge.
+#
+# Failing is the right answer to both ways this can fail. The claim was swept by
+# a newer compaction, or a newer marker already holds the name — and an older
+# claim returning must not displace it. Either way the older snapshot is
+# superseded, which is the same disposition every superseded snapshot gets.
 restore_claim() {
-	if [ -s "$pending" ]; then
-		(set -C; cat "$pending" >"$marker") 2>/dev/null
-	fi
+	ln "$pending" "$marker" 2>/dev/null
 	rm -f "$pending"
 }
 
