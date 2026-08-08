@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Pre-1.0 releases may introduce breaking changes freely as the storage layout and hook contract converge. After 1.0, changes will follow semver strictly.
 
+## [0.1.2] - 2026-08-08
+
+> streaming the journal so the memory keeps arriving
+
+### Fixed — the 128 MiB ceiling silently stopped snapshots on long sessions
+
+`read_window` refused any journal larger than 128 MiB and slurped the rest
+into a `String`. The refusal was silent from the host's point of view — the
+hook exits successfully with no output either way — so a session that grew
+past the ceiling kept compacting, and each compaction landed with no memory
+update, on every subsequent compaction, until the session ended or the
+journal shrank.
+
+The ceiling was the wrong shape of defence. The window that comes out is
+bounded by `MAX_WINDOW_CHARS` regardless of source size, so all the
+file-size limit was really guarding against was `read_to_string` allocating
+past what fits. The reader now streams the file line by line, and each
+line is byte-capped by a `MAX_LINE_BYTES` of 32 MiB — enough for real
+tool-output records, short enough that a runaway line cannot exhaust the
+worker. Accumulated entries sit in a `VecDeque` capped by cumulative
+character count at `MAX_WINDOW_CHARS * 2`; over-cap pushes pop from the
+front, so memory is a small constant multiple of the tail regardless of how
+big the journal has grown.
+
+Fault handling is by kind, not uniform: invalid UTF-8 or an over-length
+record is dropped locally and the reader continues, `ErrorKind::Interrupted`
+retries in place, and any other I/O error is propagated all the way out.
+The reader never returns an `Ok(Window)` for a run it did not finish — the
+first shape of the fix did, and hid the missing tail behind a successful
+return.
+
 ## [0.1.1] - 2026-08-05
 
 > what cannot cross whole crosses as a key
@@ -208,5 +239,6 @@ The exit status distinguishes what happened, because the delivery hook depends
 on it: `0` handed over a handoff, `1` had nothing to hand over or failed, `2`
 was called wrong. A caller that discharges a snapshot should do so only on `0`.
 
+[0.1.2]: https://github.com/naoto256/amnestic-trace/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/naoto256/amnestic-trace/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/naoto256/amnestic-trace/releases/tag/v0.1.0
