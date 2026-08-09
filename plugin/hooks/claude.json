@@ -1,0 +1,57 @@
+{
+  "description": "Amnestic Trace PreCompact capture + injection (Claude Code). Codex reads hooks/codex.json instead; the two differ in what each can safely assert about timeouts and output size, not in what they do.",
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/tools/amtr-hook.sh\" synthesize",
+            "statusMessage": "Amnestic Trace: capturing working memory",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/tools/amtr-hook.sh\" recall SessionStart",
+            "statusMessage": "Amnestic Trace: restoring working memory",
+            "timeout": 35
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/tools/amtr-hook.sh\" recall PreToolUse",
+            "statusMessage": "Amnestic Trace: restoring working memory",
+            "timeout": 35
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/tools/amtr-hook.sh\" recall UserPromptSubmit",
+            "statusMessage": "Amnestic Trace: restoring working memory",
+            "timeout": 35
+          }
+        ]
+      }
+    ]
+  }
+}

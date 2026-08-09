@@ -1,0 +1,60 @@
+{
+  "description": "Amnestic Trace PreCompact capture + injection (Codex). Declared separately from hooks/claude.json because the two hosts differ in what can be asserted here, not because the work differs — both run the same tools/amtr-hook.sh. additionalContextLimit raises the size at which this host spills a hook's output to a file and hands the model a preview; a memory delivered that way is a path, not a memory.",
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" synthesize",
+            "statusMessage": "Amnestic Trace: capturing working memory",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" recall SessionStart",
+            "statusMessage": "Amnestic Trace: restoring working memory",
+            "additionalContextLimit": 4000,
+            "timeout": 35
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" recall PreToolUse",
+            "statusMessage": "Amnestic Trace: restoring working memory",
+            "additionalContextLimit": 4000,
+            "timeout": 35
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/tools/amtr-hook.sh\" recall UserPromptSubmit",
+            "statusMessage": "Amnestic Trace: restoring working memory",
+            "additionalContextLimit": 4000,
+            "timeout": 35
+          }
+        ]
+      }
+    ]
+  }
+}

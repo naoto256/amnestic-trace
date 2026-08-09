@@ -1,0 +1,284 @@
+# Amnestic Trace Plugin
+
+Amnestic Trace replaces a session's short-term working memory across a context
+boundary. This plugin wires the three hooks that make that automatic on both
+Claude Code and Codex, and ships the `/amtr` skill for handing memory to another
+session.
+
+## What it does
+
+- **`PreCompact` hook** (declared in both `hooks/claude.json` and
+  `hooks/codex.json` → `tools/amtr-hook.sh synthesize`).
+  Forwards the host payload to `amtr synthesize`, which records an undelivered
+  snapshot and detaches a worker before returning. Extraction therefore runs in
+  parallel with compaction itself rather than delaying it.
+- **`SessionStart` hook, matched to `compact`**
+  (`tools/amtr-hook.sh recall SessionStart`). Fires the instant a compaction
+  ends, which is the earliest anything can be injected — `PreCompact` cannot
+  inject on either host, and would have nothing to inject if it could, since the
+  extraction has only just been handed its input. Extraction runs beside the
+  compaction, so the two race; when extraction wins, the memory lands here,
+  before the resumed session does anything else. When it does not, this hook
+  waits on the shared window below rather than abandoning the debt.
+- **`PreToolUse` hook** (`tools/amtr-hook.sh recall PreToolUse`). Delivers the snapshot at
+  the first tool call after it is ready, for the stretch where the session keeps
+  working and the user has not spoken again. If extraction is still in flight it
+  opens or joins the one 25s deadline shared by all three delivering hooks for
+  that compaction debt. Arrivals inside the window wait only for its remainder;
+  arrivals after it atomically fold the unfinished debt.
+- **`UserPromptSubmit` hook** (`tools/amtr-hook.sh recall UserPromptSubmit`). For
+  turns that call no tools at all. It opens the shared deadline when it arrives
+  first, or joins the remainder already spent by SessionStart or PreToolUse; it
+  never grants the same debt a second budget. Like the other two events, if the
+  marker is still `ongoing` when that window expires it atomically folds the
+  debt. A ready claim published in that race survives for a later event.
+- **`/amtr` skill** (`skills/amtr/`). A thin wrapper over
+  `amtr recall Handoff --amtr-key` for the cross-session case, plus a bare `/amtr` for
+  reading back this session's own key. Compaction inside one session needs no
+  key and no skill.
+
+The three delivering hooks can fire on the same turn once a snapshot is ready,
+and so do concurrent tool calls — the shared deadline wakes every waiter at
+once, so they reach the ready claim together by design. The marker is what
+stops the memory being injected twice, but it has to be taken *before* the
+injection to do that: whoever gets there first renames it out of everyone else's
+reach, which exactly one caller can win, and only that one delivers. Discharging
+it afterwards would settle the bookkeeping after the second copy had already
+reached the host. Ownership is checked against the exact claim, so a newer
+snapshot landing mid-turn survives untouched in a marker of its own.
+
+A held claim is either discharged or put back, but a process killed between the
+two leaves the file it was holding behind. The next `synthesize` sweeps any left
+over, since a new compaction supersedes whatever they were holding anyway.
+
+The binary serializes `additionalContext` for the exact event it was handed.
+`PreToolUse` ignores plain stdout on both hosts, so building this object in the
+binary keeps JSON escaping and claim discharge in one operation.
+
+Both hosts run the same `tools/amtr-hook.sh`, but each declares it in its own
+file: `hooks/claude.json` and `hooks/codex.json`, each named by the `hooks` key
+in that host's manifest. Neither is found by convention, so the pairing is
+stated rather than inferred. The script is shared because the work is
+identical; it deliberately contains no JSON, clock, path or claim logic. It
+repairs PATH, forwards the canonical command and makes failures non-fatal. The
+declarations are split because what can be asserted about each host is not.
+
+Concretely, both files set `timeout` explicitly, in seconds — 10s for the
+capture hook, which returns as soon as the worker has detached, and 35s for each
+delivering hook, which needs room for a 25s wait plus the read that follows.
+Both numbers come from what this plugin does rather than from either host's
+default, and Codex's default of 600s is far too long for a hook that might be
+waiting on an extraction that has died.
+
+The Codex file sets `additionalContextLimit` on all three delivering hooks, which
+Claude Code has no equivalent for. Codex caps model-visible hook output at
+roughly 2,500 tokens and spills the rest to a file, handing the model a preview
+and a path; memory delivered that way is a reference the model has to choose to
+follow. The handoff is kept under that on its own — this is the margin, not the
+mechanism.
+
+## Prerequisites
+
+- `amtr` on `PATH`:
+
+  ```sh
+  brew install naoto256/amnestic-trace/amtr
+  ```
+
+  `cargo install --path .` from the repo root works too, as does dropping a
+  release binary in `~/.local/bin`. The hook script appends all three prefixes,
+  plus `/usr/local`, because hook execution inherits a minimal `PATH` that omits
+  them. Appended rather than prepended, so nothing here shadows the system's own
+  tools.
+
+- The host CLI that produced the journal (`claude` or `codex`) must be on
+  `PATH` and authenticated — that is what performs the extraction. amtr reads
+  the journal to decide which one to launch and never holds credentials itself.
+
+## What the extraction agent can do
+
+Summarizing needs no tools, so the agent is launched with as few as each host
+allows. That is not the same amount on both, and the difference is worth
+knowing before you install this.
+
+The agent's input is a session journal, which contains text this tool did not
+author — fetched pages, dependency output, error messages. Text like that can
+try to steer whatever reads it.
+
+- **Claude Code**: launched with `--tools ""`, so the built-in tools are
+  unavailable rather than merely unapproved, and `--strict-mcp-config` with no
+  config supplied leaves no MCP servers. Verified by running it: the model can
+  describe a command it would like to run, and cannot run one.
+- **Codex**: launched with `--sandbox read-only`, `-c features.shell_tool=false`
+  and `-c mcp_servers={}`. Two of those three do something.
+
+  **What they achieve.** The shell is genuinely gone, and local writes are
+  genuinely blocked — an `apply_patch` comes back "writing is blocked by
+  read-only sandbox".
+
+  **What they do not.** `-c mcp_servers={}` is a no-op on current Codex — an
+  upstream bug, [openai/codex#16045](https://github.com/openai/codex/issues/16045),
+  still open. An empty inline TOML table merges with your existing
+  configuration instead of replacing it, so every configured server survives
+  and Codex reports no error. Measured with both arms in the same environment:
+  identical, and a canary file outside the working directory came back either
+  way.
+
+  More importantly, the sandbox governs the *local process*. Codex's hosted
+  tools and your configured MCP servers do not run inside it, so `read-only`
+  says nothing about them. Measured under exactly this flag set: the hosted
+  web-fetch tool retrieved a public URL successfully, and the agent's tool
+  inventory included tools that write to a remote host over SSH, send mail, and
+  publish a website.
+
+  The per-server workaround in that issue,
+  `-c mcp_servers.<name>.enabled=false`, is not used here: it needs the name of
+  every server you have configured, which this tool cannot know, and a list
+  that misses one would close nothing while appearing to close everything.
+
+  When #16045 is fixed the override starts working on its own, and this section
+  should be re-measured rather than assumed.
+
+**What this means for the Codex path.** Journal text that successfully steers
+the extraction agent can have it read any file you can read and **send the
+contents off your machine**. It cannot write locally, and whatever it folds
+into the handoff you would see in your next turn — but exfiltration does not
+need the handoff, and the network path does not go through the sandbox.
+
+This is stated so you can decide, not because it is fixed. Only one of the two
+paths closes it: Claude Code, where the agent genuinely has no tools.
+
+Pointing Codex at a `CODEX_HOME` that carries authentication and defines no MCP
+servers removes one outbound route, not the class. Codex's own hosted tools are
+not configured there and are not subject to the sandbox, so a second Codex home
+narrows the exposure at the cost of maintaining it — it does not end it. Treat
+any arrangement as partial until you have measured it the way described below.
+
+To check your own setup, run the extraction command by hand against a canary
+file outside the working directory and see whether it comes back. Phrase the
+prompt as an instruction rather than a question: given an easy way to decline,
+the agent may simply decline, and a file that was not read is not evidence that
+it could not have been.
+
+The agent runs in an empty temporary directory, deleted afterwards, so nothing
+belonging to this tool — other sessions' handoffs, their keys, the prompt — sits
+where it starts.
+
+No daemon, no config file, and no environment variable. The extraction prompt is
+built into the binary. Nothing is written to `~/.local/share/amtr/prompt.md`; if
+you create that file, it is used instead — that is the whole customization
+surface.
+
+So an install that never customizes anything carries no prompt file, and each
+upgrade brings its improved default along with it. To start from the current
+default rather than a blank page:
+
+```sh
+amtr default-prompt > ~/.local/share/amtr/prompt.md
+```
+
+**Upgrades never touch that file.** Once it exists it is yours, and no version of
+this tool writes there, so an upgrade cannot replace prompt text you tuned. The
+cost is that later improvements to the default stop reaching you — re-run the
+command above (or delete the file) to pick them up.
+
+## Install
+
+Both hosts discover plugins through marketplace catalogs, not by scanning
+directories. The repo root carries a `.claude-plugin/marketplace.json` that
+points at this `plugin/` subdirectory as the install source, and it serves both
+hosts.
+
+### Claude Code
+
+```sh
+claude plugin marketplace add naoto256/amnestic-trace
+claude plugin install amtr@naoto256-amtr
+```
+
+From a local checkout during development:
+
+```sh
+claude plugin marketplace add /absolute/path/to/amnestictrace
+claude plugin install amtr@naoto256-amtr
+```
+
+### Codex
+
+```sh
+codex plugin marketplace add naoto256/amnestic-trace
+codex plugin add amtr@naoto256-amtr
+```
+
+From a local checkout:
+
+```sh
+codex plugin marketplace add /absolute/path/to/amnestictrace
+codex plugin add amtr@naoto256-amtr
+```
+
+Codex reads `.codex-plugin/plugin.json` and, through it, `hooks/codex.json`
+from this same directory. Hooks must also be enabled in `~/.codex/config.toml`:
+
+```toml
+[features]
+hooks = true
+```
+
+(Older Codex builds called this `codex_hooks`; that spelling still loads but
+warns that it is deprecated.)
+
+Restart the session on either host so the hooks take effect. The first
+interactive Codex session after installing will ask you to review and trust the
+new hooks before it will run them — hooks run outside its sandbox, so Codex
+requires a human to approve them and no amount of configuration skips that.
+
+That approval is bound to the hook definitions it was given, by hash, so it does
+not survive them changing. Any update that edits a hook — a command, a timeout,
+even a status message — invalidates it, and the next session asks again. Until it
+is answered the hooks do not run, and nothing reports that: a hook that is never
+invoked cannot say it was skipped, so the only visible symptom is that whatever
+the hooks did quietly stops happening. Answer the prompt after an update, and if
+memory has stopped arriving without one, the approval on file belongs to hook
+definitions that are no longer installed.
+
+For a marketplace added from a local directory, Codex runs the plugin **from
+that directory**, not from the copy under `~/.codex/plugins/cache/`. Editing the
+source takes effect on the next session; editing the cache does nothing. A
+Git-backed marketplace behaves the other way around and needs
+`codex plugin marketplace upgrade naoto256-amtr` to pick up changes.
+
+`codex exec` does fire the delivery hooks — it emits `UserPromptSubmit` and
+`PreToolUse` like an interactive session. They simply have nothing to deliver: a
+non-interactive run is its own session with its own id, so they find no marker
+for it and exit without injecting. The same is true of the extraction subprocess
+this tool launches, which is why that does not feed itself its own memory.
+
+## Uninstall
+
+```sh
+claude plugin uninstall amtr@naoto256-amtr
+codex plugin remove amtr@naoto256-amtr
+```
+
+Removing the plugin stops all capture and injection but leaves stored memory in
+place. To discard that too:
+
+```sh
+rm -rf ~/.local/share/amtr   # or ~/.amtr, whichever it resolved to
+```
+
+Uninstalling with a snapshot still undelivered is safe: nothing reads the
+marker once the hooks are gone.
+
+## Files
+
+- `.claude-plugin/plugin.json` — Claude Code manifest; names `hooks/claude.json`.
+- `.codex-plugin/plugin.json` — Codex manifest; names `hooks/codex.json`, and
+  adds `skills` so Codex finds `/amtr` (Claude Code takes `skills/` by
+  convention).
+- `hooks/claude.json`, `hooks/codex.json` — `PreCompact` capture, plus delivery
+  from `SessionStart`, `PreToolUse` and `UserPromptSubmit`, declared per host.
+- `tools/amtr-hook.sh` — thin fail-open adapter for the four canonical binary
+  invocations; all payload and delivery behavior lives in Rust.
+- `skills/amtr/SKILL.md` — the `/amtr <amtr_key> [clone]` wrapper.
