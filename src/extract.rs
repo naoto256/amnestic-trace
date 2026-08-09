@@ -1,0 +1,605 @@
+//! Runs the extraction agent over {prior handoff, journal window} and checks
+//! the result is usable. Anything short of a clean answer is an error, and
+//! every caller of this module treats an error as "write nothing".
+
+use std::io::{self, Read, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::journal::Host;
+
+/// Shipped default. Nothing writes it to disk: an install that never
+/// customizes anything has no `prompt.md`, so it tracks the binary. See
+/// `Store::extraction_prompt` for what overrides it.
+pub const DEFAULT_PROMPT: &str = include_str!("default-prompt.md");
+
+/// Why a synthesize produced no new snapshot.
+///
+/// Two variants, because two is how many the caller distinguishes: whether this
+/// was a failure at all. Nothing downstream reasons about recoverability, so
+/// naming kinds of failure would claim a retry policy that does not exist.
+/// Everything else belongs in the message, which is what the log prints.
+#[derive(Debug)]
+pub enum Failed {
+    /// Nothing new in the journal. Not a failure — there was no work.
+    Vacuous,
+    /// Something went wrong. The message says what; nothing branches on it.
+    Failed(String),
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failed::Vacuous => write!(f, "nothing new since the previous compaction"),
+            Failed::Failed(m) => write!(f, "no snapshot written: {m}"),
+        }
+    }
+}
+
+impl From<io::Error> for Failed {
+    fn from(e: io::Error) -> Self {
+        Failed::Failed(e.to_string())
+    }
+}
+
+/// What a handoff may cost the context it is injected into, in tokens.
+///
+/// Not a preference. Hosts cap the model-visible part of a hook's output and
+/// spill the rest to a file, handing the model a head-and-tail preview and a
+/// path — so an oversized handoff does not arrive truncated, it arrives with
+/// its middle replaced, in a shape that still reads like a handoff. Measured on
+/// Codex: 9,129 characters of ASCII (~2,280 tokens) arrived whole and 11,128
+/// (~2,780) spilled, which puts the threshold where that host documents it, at
+/// roughly 2,500 tokens per message.
+///
+/// The budget here is what is left of that after the header and the preamble,
+/// with room to spare. Spilling costs more than the missing words: the file is
+/// world-readable under the system temp directory, and recovering the memory
+/// from it takes a tool call that nothing obliges the model to make.
+const MAX_HANDOFF_TOKENS: usize = 2_000;
+const MIN_HANDOFF_CHARS: usize = 20;
+
+/// Tokens, near enough to spend a budget against.
+///
+/// A real tokenizer would be a dependency, a download and a version to track,
+/// for a number this only needs to the nearest few percent. CJK runs about a
+/// token per character and Latin script about a quarter of one, which is the
+/// whole model: the two differ by 4x, and that is the difference that decides
+/// whether a handoff fits.
+///
+/// It rounds against the handoff — an estimate that reads low would let one
+/// through to be silently gutted, and reading high only costs a few sentences.
+pub fn estimated_tokens(text: &str) -> usize {
+    let (wide, narrow) = text.chars().fold((0usize, 0usize), |(w, n), c| {
+        // CJK, kana, and the fullwidth forms, plus the supplementary planes
+        // where the rest of Han lives. The estimate is allowed to be rough but
+        // not to round in the handoff's favour: anything counted narrow that is
+        // not passes validation and is then delivered with its middle gone.
+        if ('\u{2E80}'..='\u{FFEF}').contains(&c) || c >= '\u{1F000}' {
+            (w + 1, n)
+        } else {
+            (w, n + 1)
+        }
+    });
+    wide + narrow.div_ceil(4)
+}
+
+pub fn compose(prompt: &str, prior: Option<&str>, window: &str) -> String {
+    format!(
+        "{prompt}\n\n\
+         ## Prior handoff\n\n{}\n\n\
+         ## Session journal since the previous compaction\n\n{}\n",
+        prior
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or("(none - this is the first compaction of this session)"),
+        if window.trim().is_empty() {
+            "(empty)"
+        } else {
+            window
+        },
+    )
+}
+
+/// An extraction that has not finished by now is wedged, not slow. Bounded so
+/// the marker cannot stay `ongoing` forever and block every later delivery.
+const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Launches the CLI that produced this journal, since that is the one known to
+/// be installed and authenticated in this environment.
+///
+/// Summarizing a transcript needs no tools, and the journal being summarized is
+/// full of text written by whatever the session was working on — so an agent
+/// that can run commands turns that text into an execution path.
+///
+/// How completely that is achieved differs by host, and the difference is worth
+/// stating plainly rather than papering over:
+///
+/// - **Claude Code**: `--tools ""` makes the built-in tools unavailable, and
+///   `--strict-mcp-config` with no config supplied leaves no MCP servers.
+///   Verified by running it: the model can describe a command it would like to
+///   run, and cannot run one.
+/// - **Codex**: the agent cannot be disarmed. What the flags do achieve, and
+///   what they do not, was measured under the exact flag set below.
+///
+///   Achieved: `features.shell_tool=false` removes the shell, and
+///   `--sandbox read-only` blocks local writes — an `apply_patch` comes back
+///   "writing is blocked by read-only sandbox".
+///
+///   Not achieved: the sandbox governs the local process, not the tools Codex
+///   hosts or proxies. `mcp_servers={}` is passed and does nothing — upstream
+///   bug openai/codex#16045, still open: an empty inline TOML table merges
+///   non-destructively with the existing configuration, so every configured
+///   server survives and no error is reported. Measured with both arms in the
+///   same environment, one with the override and one without: identical, and a
+///   canary file outside the working directory comes back either way.
+///
+///   The per-server form the upstream issue suggests,
+///   `mcp_servers.<name>.enabled=false`, is deliberately not used. It needs the
+///   name of every server the user has configured, which this tool cannot know
+///   — and a list that misses one closes nothing while looking like it did.
+///
+///   Outbound network is **not** closed. The hosted web-fetch tool retrieved a
+///   public URL under this flag set, and the agent's tool inventory included
+///   tools that write to a remote host over SSH, send mail, and publish a
+///   website. Those run outside the sandbox, so `read-only` does not reach
+///   them.
+///
+///   So on Codex, journal text that successfully steers the extraction agent
+///   can have it read any file the user can read *and get the contents off the
+///   machine*. This is an accepted risk, not a solved problem: extraction still
+///   runs on Codex, and the flags stay because each one removes something real.
+///
+/// `workdir` is an empty scratch directory in both cases, so nothing of this
+/// tool's own — other sessions' handoffs, their keys, the prompt — is sitting
+/// in reach of whatever does run.
+pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
+    let cmd = match host {
+        Host::Claude => {
+            let mut c = Command::new("claude");
+            c.args([
+                "-p",
+                "--output-format",
+                "text",
+                // Availability, not pre-approval: `--allowedTools ""` would
+                // approve nothing in advance while leaving every tool present
+                // and callable.
+                "--tools",
+                "",
+                // Ignore every configured MCP server. None is passed, so this
+                // leaves the agent with none.
+                "--strict-mcp-config",
+            ]);
+            c
+        }
+        Host::Codex => {
+            let mut c = Command::new("codex");
+            c.args([
+                "exec",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                // Removes the shell tool. Verified: the agent reports having no
+                // way to run a command.
+                "-c",
+                "features.shell_tool=false",
+                // A no-op today: openai/codex#16045 — an empty inline TOML
+                // table merges with the existing config rather than replacing
+                // it, so every configured server survives and nothing errors.
+                // Kept as a statement of intent that starts working by itself
+                // once that is fixed. It is NOT a defence — see this function's
+                // doc for what the Codex path actually allows.
+                "-c",
+                "mcp_servers={}",
+                "-C",
+            ]);
+            c.arg(workdir);
+            c.arg("-");
+            c
+        }
+    };
+    drive(cmd, input, workdir)
+}
+
+/// Feeds `cmd` the composed input and validates what comes back.
+///
+/// Split from `run` so a test can supply a command that fails on purpose. The
+/// stderr rule this enforces cannot be checked by reading the code — one
+/// attempt at it already passed review while leaving the failure paths open —
+/// so it needs a fake agent that writes a marker to stderr and exits badly.
+fn drive(mut cmd: Command, input: &str, workdir: &Path) -> Result<String, Failed> {
+    let mut child = cmd
+        .current_dir(workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        // Captured and discarded, never inherited. The agent CLIs echo their
+        // final message to stderr — the whole handoff — so inheriting fed every
+        // project's working memory into one shared log, which the store's
+        // one-row-per-session design exists to not keep. Writing it out only on
+        // failure does not fix that: a handoff too long to validate, or a run
+        // killed mid-answer, is exactly when there is a handoff on stderr to
+        // leak. The channel carries content and diagnostics mixed together and
+        // nothing here can tell them apart, so none of it is logged.
+        .stderr(Stdio::piped())
+        .spawn()
+        // Not installed, not on PATH, not executable: nothing about this window
+        // is wrong, so the marker should survive for a later attempt.
+        .map_err(|e| Failed::Failed(format!("could not start the extraction agent: {e}")))?;
+
+    // Both pipes are serviced off-thread. The input is larger than a pipe
+    // buffer and the output can be too, so writing and reading inline would
+    // deadlock against a child doing the opposite.
+    let mut sink = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("no stdin"))?;
+    let payload = input.to_string();
+    let writer = std::thread::spawn(move || sink.write_all(payload.as_bytes()));
+
+    let mut source = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("no stdout"))?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        source.read_to_end(&mut buf).map(|_| buf)
+    });
+
+    // Drained off-thread like the others so a chatty child cannot fill the
+    // pipe and stall. Held back until the outcome is known.
+    let mut err_source = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("no stderr"))?;
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_source.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + EXTRACTION_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let note = stderr_note(err_reader);
+            return Err(Failed::Failed(format!("extraction agent timed out{note}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    // The writer's error is deliberately ignored: a child that exits early
+    // leaves a broken pipe here, and its exit status is the better diagnostic.
+    let _ = writer.join();
+    let stdout = reader
+        .join()
+        .map_err(|_| Failed::Failed("output reader panicked".into()))?
+        .map_err(|e| Failed::Failed(format!("could not read the agent's output: {e}")))?;
+
+    if !status.success() {
+        // The agent ran and decided it could not do this. Feeding it the same
+        // window again will reach the same place.
+        let note = stderr_note(err_reader);
+        return Err(Failed::Failed(format!(
+            "extraction agent exited with {status}{note}"
+        )));
+    }
+    match validate(&strip_preamble(&String::from_utf8_lossy(&stdout))) {
+        Ok(handoff) => Ok(handoff),
+        Err(e) => {
+            let note = stderr_note(err_reader);
+            Err(Failed::Failed(format!("{e}{note}")))
+        }
+    }
+}
+
+/// Says that the agent wrote to stderr, and how much, without saying what.
+///
+/// Returned rather than printed, so that the `Failed` message is the only
+/// channel from here to the log. Printing directly would leave a second one,
+/// and it is a second one that went wrong before: an earlier version captured
+/// these bytes and logged them on failure, which reads safe and is not —
+/// failure is when there is a handoff on stderr to leak. With one channel, a
+/// test that inspects the returned failure has inspected all of them.
+///
+/// The bytes themselves never travel. They are the agent's final message as
+/// often as a diagnostic, nothing here can tell those apart, and a size is
+/// enough to tell an operator whether re-running the agent by hand will show
+/// them anything.
+fn stderr_note(reader: std::thread::JoinHandle<Vec<u8>>) -> String {
+    match reader.join().map(|b| b.len()).unwrap_or(0) {
+        0 => String::new(),
+        bytes => format!(
+            " (it also wrote {bytes} bytes to stderr, withheld: the agent CLIs \
+             echo the handoff there)"
+        ),
+    }
+}
+
+/// Drops anything before the first `##` heading.
+///
+/// Told to emit only the handoff, the extraction agent still narrates its way
+/// into it ("Looking at the journal... let me write this honestly"). That text
+/// then becomes the memory a session wakes up holding, where reasoning about a
+/// past task is indistinguishable from the task. The prompt defines the handoff
+/// as beginning at its first section, so anything earlier is not part of it.
+///
+/// A prompt edited to drop the headings has no first section, and then this
+/// leaves the output alone rather than emptying it. The prompt is the user's to
+/// rewrite, so that case is reachable.
+fn strip_preamble(raw: &str) -> String {
+    let text = raw.trim_start();
+    // Checked before searching for a heading mid-text, or the search finds the
+    // *second* section and cuts the first one away.
+    if text.starts_with("## ") {
+        return text.to_string();
+    }
+    match text.find("\n## ") {
+        Some(i) => text[i + 1..].to_string(),
+        None => raw.to_string(),
+    }
+}
+
+/// The only gate between a flaky agent run and overwriting working memory.
+pub fn validate(raw: &str) -> Result<String, String> {
+    let text = raw.trim();
+    if text.chars().count() < MIN_HANDOFF_CHARS {
+        return Err("produced no usable handoff".into());
+    }
+    let tokens = estimated_tokens(text);
+    if tokens > MAX_HANDOFF_TOKENS {
+        // Rejecting costs this compaction its memory, which is the lesser of
+        // the two: a handoff over the budget is delivered with its middle
+        // replaced by a file path, and nothing downstream can tell that from a
+        // handoff that simply had less to say.
+        return Err(format!(
+            "about {tokens} tokens, over the {MAX_HANDOFF_TOKENS} the host will \
+             deliver whole"
+        ));
+    }
+    Ok(text.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Set on the re-executed test binary to turn it into the helper below.
+    const HELPER: &str = "AMTR_TEST_FAILING_AGENT";
+    const HELPER_TEST: &str = "extract::tests::run_as_the_failing_agent_helper";
+    const MARKER: &str = "CANARYHANDOFFTEXT";
+    /// What the helper prefixes the failure with, so the parent can tell a
+    /// reported failure apart from anything else on stdout.
+    const REPORTED: &str = "FAILURE=";
+
+    /// The helper. Inert unless `HELPER` is set, so a normal run passes it by.
+    ///
+    /// Its whole reason for existing is that the assertion needs a process
+    /// whose fd 2 is a file, and fd 2 is process-global: doing that with
+    /// `dup2` inside the test runner would redirect unrelated tests running
+    /// concurrently, and a panic between redirect and restore would strand the
+    /// rest of the run on the capture file. So the parent re-executes this
+    /// binary instead and owns the child's stderr from the outside, where
+    /// nothing else shares it.
+    #[test]
+    fn run_as_the_failing_agent_helper() {
+        let Ok(spec) = std::env::var(HELPER) else {
+            return;
+        };
+        let (stdout, code) = spec.split_once(' ').expect("helper spec");
+
+        let dir = std::env::temp_dir().join(format!("amtr-drive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("workdir");
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "cat >/dev/null; printf %s '{stdout}'; printf %s '{MARKER}' >&2; exit {code}"
+        ));
+        let outcome = drive(cmd, "irrelevant input", &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // stdout, because the parent has taken stderr for the capture.
+        match outcome {
+            Ok(handoff) => println!("UNEXPECTED_SUCCESS={handoff}"),
+            Err(e) => println!("{REPORTED}{e}"),
+        }
+    }
+
+    /// Re-executes the test binary as the helper, with its stderr pointed at a
+    /// fresh file. Returns what the helper printed and what landed in that
+    /// file — which in the worker is the log.
+    fn drive_a_failing_agent(stdout: &str, code: i32) -> (String, String) {
+        let log = std::env::temp_dir().join(format!(
+            "amtr-captured-stderr-{}-{code}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let sink = std::fs::File::create(&log).expect("capture file");
+
+        let out = Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", HELPER_TEST, "--nocapture", "--test-threads=1"])
+            .env(HELPER, format!("{stdout} {code}"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(sink))
+            .output()
+            .expect("re-exec the test binary as the helper");
+        assert!(out.status.success(), "helper exited with {}", out.status);
+
+        let captured = std::fs::read_to_string(&log).expect("read the capture");
+        std::fs::remove_file(&log).expect("clean up the capture");
+        (String::from_utf8_lossy(&out.stdout).into_owned(), captured)
+    }
+
+    #[test]
+    fn a_failing_agents_stderr_never_reaches_the_log() {
+        // Inspection is not enough here: the first attempt at this rule logged
+        // stderr "only on failure", which reads safe and is not — a run killed
+        // mid-answer or one whose handoff was too long to validate has already
+        // had that handoff echoed to stderr by the CLI. Both failure paths are
+        // driven with a marker standing in for it.
+        for (case, stdout, code) in [
+            ("nonzero exit", "", 9),
+            // Exits 0 with output too short to be a handoff, so the failure is
+            // `validate`'s rather than the child's.
+            ("invalid output", "no", 0),
+        ] {
+            let (printed, log) = drive_a_failing_agent(stdout, code);
+
+            // Catches the regression at its source: with `Stdio::inherit()`
+            // the agent writes to the helper's own fd 2, which is this file.
+            assert!(
+                !log.contains(MARKER),
+                "{case}: the agent's stderr reached the log: {log}"
+            );
+
+            // And catches it downstream, where the first attempt put it: a
+            // failure path that folds the captured bytes into its own message
+            // logs them just as surely, since the failure is what gets logged.
+            // Not a line prefix: `--nocapture` leaves the harness's own
+            // "test ... " on the front of the same line.
+            let reported = printed
+                .split_once(REPORTED)
+                .and_then(|(_, rest)| rest.lines().next())
+                .unwrap_or_else(|| panic!("{case}: the helper reported no failure: {printed}"));
+            assert!(
+                !reported.contains(MARKER),
+                "{case}: the agent's stderr reached the failure message: {reported}"
+            );
+            // The failure still has to be legible, or the rule would be
+            // satisfied by saying nothing at all.
+            assert!(
+                reported.len() > "no snapshot written: ".len(),
+                "{case}: the failure says nothing about itself: {reported}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_and_whitespace_output() {
+        assert!(validate("").is_err());
+        assert!(validate("   \n\t\n ").is_err());
+    }
+
+    #[test]
+    fn rejects_a_stub_too_short_to_be_a_handoff() {
+        assert!(validate("ok").is_err());
+    }
+
+    #[test]
+    fn rejects_a_runaway_that_would_blow_the_budget() {
+        assert!(validate(&"x ".repeat(MAX_HANDOFF_TOKENS * 4)).is_err());
+    }
+
+    #[test]
+    fn the_budget_is_tokens_rather_than_characters() {
+        // The same character count costs about four times as much in Japanese,
+        // and a character budget set for one script silently mis-serves the
+        // other: generous enough for Japanese lets English spill, and tight
+        // enough for English throws away most of an English handoff.
+        let ja = "作業中の状態を引き継ぐ。".repeat(200);
+        let en = "carry the working state across the boundary. ".repeat(200);
+        assert!(ja.chars().count() < en.chars().count());
+        assert!(
+            estimated_tokens(&ja) > estimated_tokens(&en),
+            "shorter Japanese text must still cost more: {} vs {}",
+            estimated_tokens(&ja),
+            estimated_tokens(&en)
+        );
+    }
+
+    #[test]
+    fn text_outside_the_basic_plane_is_not_counted_as_cheap() {
+        // Han past U+FFFF, and emoji, which a handoff picks up from quoted
+        // journal text. Counting either at a quarter of a token is the one
+        // direction this estimate must not err in.
+        for wide in ["\u{20000}", "\u{2A700}", "😀"] {
+            let text = wide.repeat(400);
+            assert!(
+                estimated_tokens(&text) > 300,
+                "{wide:?} counted cheap: {} tokens for 400 characters",
+                estimated_tokens(&text)
+            );
+        }
+    }
+
+    #[test]
+    fn a_handoff_the_size_of_a_real_one_fits() {
+        // The largest handoff observed in use was about 7,200 characters of
+        // mostly-Latin prose. If the budget cannot hold that, it is not a
+        // budget, it is a refusal.
+        let realistic = "Rules, rulings, and the state of the work. ".repeat(170);
+        assert!(realistic.chars().count() > 7_000);
+        assert!(validate(&realistic).is_ok());
+    }
+
+    #[test]
+    fn accepts_and_trims_a_plausible_handoff() {
+        let out = validate("  \nStill fixing the retry loop in fetch().\n  ").unwrap();
+        assert_eq!(out, "Still fixing the retry loop in fetch().");
+    }
+
+    #[test]
+    fn narration_before_the_first_section_is_dropped() {
+        let raw = "This is a first-compaction request. Let me look at the journal.\n\n\
+                   I must not fabricate work that did not happen.\n\n\
+                   ## Rules and rulings\nnone\n";
+        let out = strip_preamble(raw);
+        assert!(out.starts_with("## Rules and rulings"), "got: {out}");
+        assert!(!out.contains("Let me look"));
+    }
+
+    #[test]
+    fn output_that_already_starts_at_a_section_is_untouched() {
+        let raw = "## Rules and rulings\nnone\n";
+        assert_eq!(strip_preamble(raw), raw);
+    }
+
+    #[test]
+    fn a_well_formed_handoff_keeps_its_very_first_section() {
+        // Standing rules are the single thing the handoff most needs to carry,
+        // and they are in the first section.
+        let raw = "## Rules and rulings\n- \"never use the Foo library\"\n\n\
+                   ## Task map and position\nfixing the parser\n";
+        let out = strip_preamble(raw);
+        assert!(
+            out.contains("never use the Foo library"),
+            "lost the rules: {out}"
+        );
+        assert!(out.contains("## Task map and position"));
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn a_headingless_prompt_keeps_its_output_rather_than_losing_it() {
+        let raw = "just a paragraph of handoff text with no headings at all";
+        assert_eq!(strip_preamble(raw), raw);
+    }
+
+    #[test]
+    fn only_the_leading_narration_goes_not_later_sections() {
+        let raw = "preamble\n\n## Rules and rulings\nnone\n\n## Rejected\nnone\n";
+        let out = strip_preamble(raw);
+        assert!(out.contains("## Rejected"));
+        assert!(out.starts_with("## Rules"));
+    }
+
+    #[test]
+    fn compose_marks_first_compaction_explicitly() {
+        let c = compose("PROMPT", None, "journal");
+        assert!(c.contains("first compaction"));
+        assert!(c.contains("journal"));
+    }
+
+    #[test]
+    fn compose_carries_the_prior_handoff() {
+        let c = compose("PROMPT", Some("carried over"), "journal");
+        assert!(c.contains("carried over"));
+        assert!(!c.contains("first compaction"));
+    }
+}
