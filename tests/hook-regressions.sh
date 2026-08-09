@@ -83,6 +83,14 @@ EOF
 	check "appended user path preserves argv" "$(cat "$work/call")" "recall PreToolUse"
 
 	fresh
+	install_stub "$work/.local/bin/amtr"
+	shell_path=$(command -v "$sh")
+	out=$(printf '%s' '{}' |
+		env -u PATH HOME="$work" "$shell_path" "$hook" recall SessionStart)
+	check "unset PATH still finds amtr" "$out" "HOOK-OUTPUT"
+	check "unset PATH preserves argv" "$(cat "$work/call")" "recall SessionStart"
+
+	fresh
 	install_stub "$work/bin/amtr"
 	for invalid in "precompact" "deliver" "recall" "recall Human" "recall PreToolUse extra"
 	do

@@ -14,7 +14,7 @@ esac
 
 # Hook processes often omit user-installed binary locations. Append them so a
 # system command already selected by the host cannot be shadowed.
-PATH="$PATH:$home/.local/bin:$home/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"
+PATH="${PATH:-}:$home/.local/bin:$home/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"
 export PATH
 
 command -v amtr >/dev/null 2>&1 || exit 0

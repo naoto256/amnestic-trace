@@ -3,8 +3,10 @@
 //! every caller of this module treats an error as "write nothing".
 
 use std::io::{self, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::journal::Host;
@@ -104,6 +106,7 @@ pub fn compose(prompt: &str, prior: Option<&str>, window: &str) -> String {
 /// An extraction that has not finished by now is wedged, not slow. Bounded so
 /// the marker cannot stay `ongoing` forever and block every later delivery.
 const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
+const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Launches the CLI that produced this journal, since that is the one known to
 /// be installed and authenticated in this environment.
@@ -147,8 +150,9 @@ const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 ///
 ///   So on Codex, journal text that successfully steers the extraction agent
 ///   can have it read any file the user can read *and get the contents off the
-///   machine*. This is an accepted risk, not a solved problem: extraction still
-///   runs on Codex, and the flags stay because each one removes something real.
+///   machine*. The project owner explicitly accepts this risk to keep automatic
+///   Codex extraction; it is not a solved problem. The flags stay because each
+///   one removes something real.
 ///
 /// `workdir` is an empty scratch directory in both cases, so nothing of this
 /// tool's own — other sessions' handoffs, their keys, the prompt — is sitting
@@ -207,7 +211,29 @@ pub fn run(host: Host, input: &str, workdir: &Path) -> Result<String, Failed> {
 /// stderr rule this enforces cannot be checked by reading the code — one
 /// attempt at it already passed review while leaving the failure paths open —
 /// so it needs a fake agent that writes a marker to stderr and exits badly.
-fn drive(mut cmd: Command, input: &str, workdir: &Path) -> Result<String, Failed> {
+fn drive(cmd: Command, input: &str, workdir: &Path) -> Result<String, Failed> {
+    drive_with_timeout(cmd, input, workdir, EXTRACTION_TIMEOUT)
+}
+
+fn drive_with_timeout(
+    mut cmd: Command,
+    input: &str,
+    workdir: &Path,
+    timeout: Duration,
+) -> Result<String, Failed> {
+    // The detached worker has its own session, but the extraction agent needs
+    // a group of its own inside that session. A timeout can then terminate the
+    // CLI and every helper it spawned without killing this worker before it
+    // clears the delivery marker.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
     let mut child = cmd
         .current_dir(workdir)
         .stdin(Stdio::piped())
@@ -251,18 +277,20 @@ fn drive(mut cmd: Command, input: &str, workdir: &Path) -> Result<String, Failed
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("no stderr"))?;
-    let err_reader = std::thread::spawn(move || {
+    let (err_tx, err_reader) = mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = err_source.read_to_end(&mut buf);
-        buf
+        let _ = err_tx.send(buf.len());
     });
 
-    let deadline = Instant::now() + EXTRACTION_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if Instant::now() >= deadline {
+            kill_process_group(child.id());
             let _ = child.kill();
             let _ = child.wait();
             let note = stderr_note(err_reader);
@@ -270,6 +298,12 @@ fn drive(mut cmd: Command, input: &str, workdir: &Path) -> Result<String, Failed
         }
         std::thread::sleep(Duration::from_millis(200));
     };
+
+    // A CLI that has exited can still leave helpers alive with our pipe ends.
+    // They have no work left to do for a completed extraction, and allowing
+    // them to survive would make the joins below depend on unrelated process
+    // lifetime.
+    kill_process_group(child.id());
 
     // The writer's error is deliberately ignored: a child that exits early
     // leaves a broken pipe here, and its exit status is the better diagnostic.
@@ -296,6 +330,17 @@ fn drive(mut cmd: Command, input: &str, workdir: &Path) -> Result<String, Failed
     }
 }
 
+fn kill_process_group(child_id: u32) {
+    let Ok(group) = libc::pid_t::try_from(child_id) else {
+        return;
+    };
+    unsafe {
+        // Negative pid selects the process group. ESRCH is the normal outcome
+        // when the direct child had no surviving helpers, so this is best-effort.
+        libc::kill(-group, libc::SIGKILL);
+    }
+}
+
 /// Says that the agent wrote to stderr, and how much, without saying what.
 ///
 /// Returned rather than printed, so that the `Failed` message is the only
@@ -309,8 +354,10 @@ fn drive(mut cmd: Command, input: &str, workdir: &Path) -> Result<String, Failed
 /// often as a diagnostic, nothing here can tell those apart, and a size is
 /// enough to tell an operator whether re-running the agent by hand will show
 /// them anything.
-fn stderr_note(reader: std::thread::JoinHandle<Vec<u8>>) -> String {
-    match reader.join().map(|b| b.len()).unwrap_or(0) {
+fn stderr_note(reader: mpsc::Receiver<usize>) -> String {
+    // A descendant outside our control may still retain the pipe even after a
+    // group kill fails. Diagnostics are optional; marker cleanup is not.
+    match reader.recv_timeout(STDERR_DRAIN_TIMEOUT).unwrap_or(0) {
         0 => String::new(),
         bytes => format!(
             " (it also wrote {bytes} bytes to stderr, withheld: the agent CLIs \
@@ -478,6 +525,42 @@ mod tests {
                 "{case}: the failure says nothing about itself: {reported}"
             );
         }
+    }
+
+    #[test]
+    fn stderr_accounting_is_bounded_when_a_writer_never_closes() {
+        let (_held_writer, reader) = mpsc::channel();
+        let started = Instant::now();
+
+        assert_eq!(stderr_note(reader), "");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stderr accounting waited without a bound"
+        );
+    }
+
+    #[test]
+    fn extraction_timeout_kills_the_agents_process_group() {
+        let dir = std::env::temp_dir().join(format!(
+            "amtr-process-group-test-{}-{}",
+            std::process::id(),
+            crate::store::mint_key()
+        ));
+        std::fs::create_dir_all(&dir).expect("workdir");
+        let sentinel = dir.join("survived");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("(sleep 1; printf survived > \"$AMTR_SENTINEL\") & sleep 30")
+            .env("AMTR_SENTINEL", &sentinel);
+
+        let outcome = drive_with_timeout(cmd, "", &dir, Duration::from_millis(50));
+        assert!(matches!(outcome, Err(Failed::Failed(message)) if message.contains("timed out")));
+        std::thread::sleep(Duration::from_millis(1_100));
+        assert!(
+            !sentinel.exists(),
+            "a descendant survived the extraction timeout"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

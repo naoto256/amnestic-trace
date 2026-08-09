@@ -12,7 +12,7 @@ sessions.
 
 ## Arguments
 
-```
+```text
 /amtr                     name this session's own key, to give to another session
 /amtr <amtr_key>          take over that snapshot (MOVE — the giving session forgets)
 /amtr <amtr_key> clone    copy it instead (the giving session keeps its memory)
@@ -106,7 +106,7 @@ The output is the key and the snapshot's boundary, tab-separated. Report both �
 the timestamp tells the user which compaction they are about to hand over — and
 show the command the other end will run, since that is what the key is for:
 
-```
+```text
 /amtr <the key you just printed>
 ```
 
