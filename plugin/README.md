@@ -1,9 +1,9 @@
 # Amnestic Trace Plugin
 
 Amnestic Trace replaces a session's short-term working memory across a context
-boundary. This plugin wires the three hooks that make that automatic on both
-Claude Code and Codex, and ships the `/amtr` skill for handing memory to another
-session.
+boundary. This plugin wires one capture hook and three delivery hooks that make
+that automatic on both Claude Code and Codex, and ships the `/amtr` skill for
+handing memory to another session.
 
 ## What it does
 
@@ -145,8 +145,10 @@ contents off your machine**. It cannot write locally, and whatever it folds
 into the handoff you would see in your next turn — but exfiltration does not
 need the handoff, and the network path does not go through the sandbox.
 
-This is stated so you can decide, not because it is fixed. Only one of the two
-paths closes it: Claude Code, where the agent genuinely has no tools.
+This is stated so you can decide, not because it is fixed. The project owner
+explicitly accepts this exposure in order to keep automatic Codex extraction;
+only one of the two paths closes it: Claude Code, where the agent genuinely has
+no tools.
 
 Pointing Codex at a `CODEX_HOME` that carries authentication and defines no MCP
 servers removes one outbound route, not the class. Codex's own hosted tools are
@@ -174,7 +176,13 @@ upgrade brings its improved default along with it. To start from the current
 default rather than a blank page:
 
 ```sh
-amtr default-prompt > ~/.local/share/amtr/prompt.md
+if [ -d "$HOME/.amtr" ] || [ ! -d "$HOME/.local" ]; then
+  amtr_root="$HOME/.amtr"
+else
+  amtr_root="$HOME/.local/share/amtr"
+fi
+mkdir -p "$amtr_root"
+amtr default-prompt > "$amtr_root/prompt.md"
 ```
 
 **Upgrades never touch that file.** Once it exists it is yours, and no version of

@@ -349,7 +349,7 @@ fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".tmp.{}", std::process::id()));
     let tmp = path.with_file_name(name);
-    {
+    let write = (|| -> io::Result<()> {
         let mut opts = fs::OpenOptions::new();
         opts.write(true).create(true).truncate(true);
         #[cfg(unix)]
@@ -359,9 +359,17 @@ fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
         }
         let mut f = opts.open(&tmp)?;
         f.write_all(body)?;
-        f.sync_all()?;
+        f.sync_all()
+    })();
+    if let Err(error) = write {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
-    fs::rename(&tmp, path)
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Creates a directory owner-only from the moment it exists.
@@ -545,6 +553,29 @@ mod tests {
     #[test]
     fn missing_session_reads_as_none() {
         assert!(scratch().load("nobody").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_failed_atomic_rename_removes_its_temporary_file() {
+        let root = scratch_dir();
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("existing-directory");
+        fs::create_dir(&destination).unwrap();
+        let temporary = root.join(format!("existing-directory.tmp.{}", std::process::id()));
+
+        let original = write_atomic(&destination, b"snapshot").unwrap_err();
+
+        assert_eq!(
+            original.kind(),
+            io::ErrorKind::IsADirectory,
+            "cleanup must not replace the rename error"
+        );
+        assert!(!temporary.exists(), "failed write leaked {temporary:?}");
+        assert!(
+            destination.is_dir(),
+            "the destination must remain untouched"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

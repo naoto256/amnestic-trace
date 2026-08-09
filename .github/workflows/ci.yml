@@ -21,6 +21,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # pin-audit:2026-06-03 de0fac2 | v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install minimum supported Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # pin-audit:2026-05-21 29eef33 | stable
+        with:
+          toolchain: 1.88.0
+
+      - name: Check MSRV
+        run: cargo check --locked
+
   check:
     runs-on: ubuntu-latest
     steps:
@@ -106,7 +121,7 @@ jobs:
         run: cargo install --locked --version 0.18.6 cargo-deny
 
       - name: cargo deny check
-        run: cargo deny check advisories bans sources licenses
+        run: cargo deny --locked check advisories bans sources licenses
 
   # The manifests decide whether either host loads anything at all. They are
   # data, so nothing else in this pipeline would notice a trailing comma or a

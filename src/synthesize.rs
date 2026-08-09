@@ -44,11 +44,11 @@ impl Request {
     /// dropped and the Codex on-disk fallback takes over. Anything past that
     /// walk is a genuine "no journal for this session" and returns None.
     fn journal(&self) -> Option<PathBuf> {
-        self.transcript_path
-            .clone()
-            .filter(|path| path.is_file())
-            .or_else(|| self.rollout_path.clone())
-            .filter(|path| path.is_file())
+        [&self.transcript_path, &self.rollout_path]
+            .into_iter()
+            .flatten()
+            .find(|path| path.is_file())
+            .cloned()
             .or_else(|| find_codex_journal(&self.session_id))
     }
 }
@@ -338,6 +338,27 @@ mod tests {
         };
 
         assert_eq!(request.journal(), Some(rollout));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transcript_path_wins_when_both_host_candidates_are_files() {
+        let root = std::env::temp_dir().join(format!(
+            "amtr-journal-priority-test-{}",
+            crate::store::mint_key()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let transcript = root.join("transcript.jsonl");
+        let rollout = root.join("rollout.jsonl");
+        fs::write(&transcript, "{}\n").unwrap();
+        fs::write(&rollout, "{}\n").unwrap();
+        let request = Request {
+            session_id: "session-a".into(),
+            transcript_path: Some(transcript.clone()),
+            rollout_path: Some(rollout),
+        };
+
+        assert_eq!(request.journal(), Some(transcript));
         let _ = fs::remove_dir_all(root);
     }
 

@@ -395,6 +395,7 @@ fn current_session_id() -> io::Result<String> {
 }
 
 pub fn report_key(session_id: &str) -> io::Result<Option<String>> {
+    store::validate_session_id(session_id)?;
     let store = Store::open()?;
     Ok(store.load(session_id)?.and_then(|row| {
         row.amtr_key
@@ -457,6 +458,12 @@ mod tests {
             handoff: "## Task map\ncarry this".into(),
             compacted_at: "2026-08-09T00:00:00.000Z".into(),
         }
+    }
+
+    #[test]
+    fn report_key_rejects_a_session_id_before_resolving_a_store_path() {
+        let error = report_key("../../outside").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

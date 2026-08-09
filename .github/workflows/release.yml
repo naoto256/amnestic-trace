@@ -32,6 +32,50 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          match = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag)
+          if match is None:
+              raise SystemExit(f"release tag must be vMAJOR.MINOR.PATCH, got {tag!r}")
+          expected = match.group(1)
+
+          cargo = tomllib.loads(Path("Cargo.toml").read_text())
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          versions = {"Cargo.toml": cargo["package"]["version"]}
+          root = [
+              package for package in lock["package"]
+              if package["name"] == cargo["package"]["name"] and "source" not in package
+          ]
+          if len(root) != 1:
+              raise SystemExit(f"Cargo.lock has {len(root)} root amtr packages, expected one")
+          versions["Cargo.lock"] = root[0]["version"]
+          for manifest in (
+              "plugin/.claude-plugin/plugin.json",
+              "plugin/.codex-plugin/plugin.json",
+          ):
+              versions[manifest] = json.loads(Path(manifest).read_text())["version"]
+
+          mismatches = {path: version for path, version in versions.items() if version != expected}
+          if mismatches:
+              detail = ", ".join(f"{path}={version}" for path, version in mismatches.items())
+              raise SystemExit(f"{tag} disagrees with product metadata: {detail}")
+
+          changelog = Path("CHANGELOG.md").read_text()
+          heading = rf"^## \[{re.escape(expected)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?$"
+          if re.search(heading, changelog, re.MULTILINE) is None:
+              raise SystemExit(f"CHANGELOG.md has no exact [{expected}] release heading")
+          PY
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # pin-audit:2026-05-21 29eef33 | stable
         with:
