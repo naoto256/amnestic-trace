@@ -182,7 +182,15 @@ else
   amtr_root="$HOME/.local/share/amtr"
 fi
 mkdir -p "$amtr_root"
-amtr default-prompt > "$amtr_root/prompt.md"
+tmp_prompt="$(mktemp "$amtr_root/prompt.md.XXXXXX")" || exit 1
+trap 'rm -f "$tmp_prompt"' EXIT
+if ! amtr default-prompt > "$tmp_prompt"; then
+  exit 1
+fi
+if ! mv "$tmp_prompt" "$amtr_root/prompt.md"; then
+  exit 1
+fi
+trap - EXIT
 ```
 
 **Upgrades never touch that file.** Once it exists it is yours, and no version of
